@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Setup
+        run: make setup
+      - name: Lint
+        run: make lint
+      - name: Typecheck
+        run: make typecheck
+      - name: Tests + coverage gates (service >= 85%)
+        run: make test
+      - name: Security (bandit + pip-audit)
+        run: make security
+      - name: Audit chains of committed runs
+        run: |
+          for d in runs/*/; do
+            uv run --frozen -- orchestrator audit verify "$(basename "$d")"
+          done
+
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: make setup
+      - name: Run all three scenarios (deterministic provider, no API key)
+        run: make demo
+      - name: Committed service/ matches orchestrator output
+        run: make verify-lineage
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose smoke test (Postgres + Redis)
+        run: |
+          docker compose up --build -d
+          for i in $(seq 1 30); do curl -fsS localhost:8000/readyz && break; sleep 2; done
+          bash scripts/smoke.sh http://localhost:8000
+          docker compose down -v
