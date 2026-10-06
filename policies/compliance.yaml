@@ -1,0 +1,31 @@
+category: compliance
+policies:
+  - id: CMP-001-no-pii-in-logs
+    check: pii_in_logs
+    severity: block
+    risk: high
+    description: log calls must not reference PII (IP, user agent, email, credentials)
+    stages: [node]
+    params:
+      pii_identifiers: [ip, ip_address, client_ip, remote_addr, client_host, user_agent, email,
+                        password, api_key, raw_key, phone, ssn]
+
+  - id: CMP-002-license-allowlist
+    check: license_allowlist
+    severity: require_approval
+    risk: medium
+    description: new dependency licenses must be on the allowlist
+    stages: [node]
+    params:
+      allowed: [mit, bsd, apache, psf, python software foundation, isc, mpl]
+
+  - id: CMP-003-analytics-retention
+    check: data_retention
+    severity: block
+    risk: medium
+    description: analytics data requires a configured retention period
+    stages: [node, release]
+    params:
+      trigger_paths: ["service/analytics*.py", "service/**/analytics*.py"]
+      config_file: service/config.py
+      setting_pattern: 'analytics_retention_days\s*:'

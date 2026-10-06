@@ -1,0 +1,48 @@
+# Controlled autonomy policy.
+# Agents may perform `autonomous` actions alone. Any `requires_approval` trigger that fires on a
+# node's change set (or node type) raises an approval gate at the trigger's risk level.
+# `never_auto_approve` levels cannot be auto-approved, except with --i-understand-high-risk (audited).
+
+autonomous:
+  - read_code            # any agent with the read permission
+  - write:service/**     # inside the node's declared write_paths only
+  - write:tests/**
+  - write:docs/**
+  - write:scripts/**
+  - run_tests            # pytest / ruff / mypy / alembic in the sandboxed workspace
+
+requires_approval:
+  - id: db_migration
+    description: database schema migration
+    risk: medium
+    paths: ["service/migrations/versions/*.py"]
+    # Destructive DDL escalates the gate to high risk.
+    escalate_patterns: ['op\.drop_', 'op\.alter_column\(.*nullable=False', 'op\.execute\(.*(DROP|TRUNCATE|DELETE)']
+
+  - id: dependency_addition
+    description: new or changed runtime dependency
+    risk: medium
+    paths: ["pyproject.toml"]
+    content_patterns: ['^\s*"[A-Za-z0-9_.\-]+(\[[^\]]*\])?\s*[<>=~!]']
+
+  - id: security_sensitive
+    description: authentication / authorization / key handling change
+    risk: high
+    paths: ["service/auth*.py", "service/**/auth*.py", "service/**/api_keys*.py", "service/security*.py"]
+
+  - id: file_deletion
+    description: deletes files
+    risk: medium
+    on_delete: true
+
+  - id: large_change
+    description: change exceeds the autonomous size limit
+    risk: medium
+    max_lines: 1200
+
+  - id: release_signoff
+    description: release sign-off (risk = max(medium, run risk))
+    risk: medium
+    node_types: ["release_check"]
+
+never_auto_approve: [high]

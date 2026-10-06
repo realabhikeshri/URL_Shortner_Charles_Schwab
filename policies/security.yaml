@@ -1,0 +1,55 @@
+category: security
+policies:
+  - id: SEC-001-secrets
+    check: secret_scan
+    severity: block
+    risk: high
+    description: no secrets in diffs (regex + entropy)
+    stages: [node, release]
+    params:
+      entropy_threshold: 4.5
+      entropy_min_length: 24
+      ignore_paths: ["docs/openapi.json"]
+      patterns:
+        - 'AKIA[0-9A-Z]{16}'                                   # AWS access key id
+        - '-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----'
+        - 'sk-ant-[A-Za-z0-9_\-]{20,}'                         # Anthropic API key
+        - 'ghp_[A-Za-z0-9]{36}'                                # GitHub token
+        - '(?i)(password|passwd|secret|api_key|token)\s*=\s*["''][^"'']{8,}["'']'
+
+  - id: SEC-002-bandit
+    check: bandit
+    severity: block
+    risk: high
+    description: bandit findings at or above medium severity
+    stages: [node]
+    params:
+      block_severities: [MEDIUM, HIGH]
+
+  - id: SEC-003-dangerous-calls
+    check: forbidden_calls
+    severity: block
+    risk: high
+    description: no eval/exec/os.system/pickle.loads/shell=True
+    stages: [node]
+
+  - id: SEC-004-dependency-allowlist
+    check: dependency_allowlist
+    severity: block
+    risk: medium
+    description: new dependencies must be on the allowlist
+    stages: [node]
+    params:
+      allowed: [fastapi, uvicorn, pydantic, pydantic-settings, sqlalchemy, aiosqlite, asyncpg,
+                alembic, redis, prometheus-client, httpx, pytest, pytest-asyncio, pytest-cov,
+                hypothesis, fakeredis, ruff, mypy]
+
+  - id: SEC-005-known-cves
+    check: pip_audit
+    severity: block
+    risk: high
+    description: new dependencies have no known CVEs (pip-audit)
+    stages: [node]
+    params:
+      offline_ok: true
+      timeout_s: 120

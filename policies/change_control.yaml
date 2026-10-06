@@ -1,0 +1,36 @@
+category: change_control
+policies:
+  - id: CHG-001-write-paths
+    check: write_path_allowlist
+    severity: block
+    risk: high
+    description: agents may only write inside the allowlist; policies/, .github/, orchestrator/ are off-limits
+    stages: [node]
+    params:
+      allow: ["service/**", "tests/**", "docs/**", "scripts/**", "README.md", "CHANGELOG.md", "pyproject.toml"]
+      deny: ["policies/**", ".github/**", "orchestrator/**"]
+
+  - id: CHG-002-diff-size
+    check: max_diff_size
+    severity: block
+    risk: medium
+    description: per-node diff must stay reviewable
+    stages: [node]
+    params:
+      max_lines: 2500
+
+  - id: CHG-003-reversible-migrations
+    check: migrations_reversible
+    severity: block
+    risk: high
+    description: every migration must implement a non-trivial downgrade()
+    stages: [node, release]
+    params:
+      paths: "service/migrations/versions/*.py"
+
+  - id: CHG-004-changelog
+    check: changelog_required
+    severity: block
+    risk: low
+    description: a CHANGELOG entry is required for release
+    stages: [release]
