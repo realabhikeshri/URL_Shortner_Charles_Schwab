@@ -1,0 +1,4 @@
+summary: Property-based tests for base62 round-trips, ordering, URL normalisation idempotence and scheme safety
+rationale: Hypothesis explores input spaces that example tests miss (unicode, huge integers, odd schemes).
+alternatives: ["Only example-based tests: rejected, weaker guarantees for parsers/encoders"]
+ops: []

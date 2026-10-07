@@ -1,0 +1,38 @@
+[project]
+name = "url-shortener"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "ASYNC", "PT", "C4", "PL"]
+ignore = ["RUF012", "PLR0913", "PLR2004", "PLR0911", "PLR0912", "PLR0915", "PLR0917"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S311", "PT018", "E501", "ASYNC240", "PLC0415"]
+"service/migrations/**" = ["E501"]
+"scripts/**" = ["S311", "T201"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["service"]
+concurrency = ["greenlet", "thread"]
+omit = ["service/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

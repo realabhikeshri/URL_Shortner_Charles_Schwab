@@ -1,0 +1,46 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "components": [
+        "service.config / service.db / service.models - settings, async engine, Link model (UTC-safe timestamps)",
+        "service.domain.codes - base62 CSPRNG codes, alias validation, reserved words",
+        "service.domain.urls - scheme/host validation and normalisation",
+        "service.links.LinkService + service.repository - use cases and SQL",
+        "service.api.{links,redirect,health,middleware} - HTTP surface, pure-ASGI middleware"
+      ],
+      "data_model": [
+        "links(id, code UNIQUE, target_url, is_custom, tags JSON, disabled, created_at, updated_at, deleted_at, idempotency_key UNIQUE, request_fingerprint)"
+      ],
+      "decisions": [
+        {
+          "decision": "302 by default (307 configurable)",
+          "rationale": "301 is cached forever by browsers, breaking disable/delete and analytics"
+        },
+        {
+          "decision": "7-char random base62 codes with bounded retry",
+          "rationale": "62^7 = 3.5e12; per-insert collision p = n/62^7; no central counter to coordinate"
+        },
+        {
+          "decision": "Soft delete + 410 Gone",
+          "rationale": "keeps audit history and prevents silent alias re-use"
+        },
+        {
+          "decision": "Idempotency-Key stored on the link with a request fingerprint",
+          "rationale": "simple, transactional, survives restarts"
+        }
+      ],
+      "open_questions": [],
+      "risks": [],
+      "summary": "Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests. Impact analysis: Empty workspace: greenfield build, no existing code is impacted.",
+      "title": "Design - URL shortener core service"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 994,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 344
+  },
+  "role": "Architect",
+  "schema": "DesignDoc",
+  "task": "design"
+}

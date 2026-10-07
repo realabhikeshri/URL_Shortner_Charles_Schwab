@@ -1,0 +1,202 @@
+# lineage: REQ-AMBIGUOUS / implement.loadcheck (see runs/ for the decision trail)
+"""Load-sanity check for the redirect hot path.
+
+Starts a real uvicorn process on a temporary SQLite database, seeds links directly through the
+service layer, warms up, then fires ``--requests`` redirects with ``--concurrency`` concurrent
+clients over HTTP and reports p50/p95/p99 latency. Rate limiting is disabled for the run because
+all load comes from one client address (the limiter is exercised by its own tests).
+
+    python scripts/loadcheck.py --requests 2000 --concurrency 20 --write docs/PERFORMANCE.md
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import platform
+import random
+import socket
+import statistics
+import sys
+import tempfile
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from service.config import Settings  # noqa: E402
+from service.db import Database, migrate  # noqa: E402
+from service.links import LinkService  # noqa: E402
+from service.schemas import LinkCreate  # noqa: E402
+
+BLOCK_START, BLOCK_END = "<!-- loadcheck:start -->", "<!-- loadcheck:end -->"
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+async def seed(database_url: str, n: int) -> list[str]:
+    settings = Settings(database_url=database_url, db_auto_migrate=False)
+    db = Database(database_url)
+    codes = []
+    async with db.session() as session:
+        service = LinkService(session, settings)
+        for i in range(n):
+            link, _ = await service.create(LinkCreate(url=f"https://example.com/page/{i}"))
+            codes.append(link.code)
+    await db.dispose()
+    return codes
+
+
+def percentile(values: list[float], pct: float) -> float:
+    ordered = sorted(values)
+    k = (len(ordered) - 1) * pct / 100
+    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+
+async def fire(
+    base: str, codes: list[str], total: int, concurrency: int
+) -> tuple[list[float], int]:
+    latencies: list[float] = []
+    errors = 0
+    rng = random.Random(42)
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for _ in range(total):
+        queue.put_nowait(rng.choice(codes))
+
+    async def worker(client: httpx.AsyncClient) -> None:
+        nonlocal errors
+        while not queue.empty():
+            code = queue.get_nowait()
+            started = time.perf_counter()
+            resp = await client.get(f"/{code}")
+            latencies.append((time.perf_counter() - started) * 1000)
+            if resp.status_code not in (302, 307):
+                errors += 1
+
+    # One client (one keep-alive connection) per worker: a single shared httpx pool serialises
+    # on its own lock under concurrency and would measure the load generator, not the service.
+    clients = [httpx.AsyncClient(base_url=base, timeout=10) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*(worker(c) for c in clients))
+    finally:
+        for c in clients:
+            await c.aclose()
+    return latencies, errors
+
+
+async def measure(requests: int, concurrency: int, links: int) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory() as tmp:
+        url = f"sqlite+aiosqlite:///{Path(tmp) / 'load.db'}"
+        await migrate(url)
+        codes = await seed(url, links)
+        port = free_port()
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "SHORTENER_DATABASE_URL": url,
+            "SHORTENER_DB_AUTO_MIGRATE": "false",
+            "SHORTENER_RATE_LIMIT_ENABLED": "false",
+            "SHORTENER_LOG_LEVEL": "WARNING",
+        }
+        server = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "uvicorn", "service.app:create_app", "--factory",
+            "--port", str(port), "--log-level", "warning", "--no-access-log",
+            cwd=ROOT, env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+        base = f"http://127.0.0.1:{port}"
+        try:
+            async with httpx.AsyncClient(base_url=base) as probe:
+                for _ in range(100):
+                    try:
+                        if (await probe.get("/healthz")).status_code == 200:
+                            break
+                    except httpx.TransportError:
+                        await asyncio.sleep(0.1)
+                else:
+                    raise RuntimeError("server did not become healthy")
+            await fire(base, codes, min(200, requests), concurrency)  # warm-up (cache, pools)
+            started = time.perf_counter()
+            latencies, errors = await fire(base, codes, requests, concurrency)
+            elapsed = time.perf_counter() - started
+        finally:
+            server.terminate()
+            await asyncio.wait_for(server.wait(), timeout=10)
+    return {
+        "requests": requests,
+        "concurrency": concurrency,
+        "links": links,
+        "errors": errors,
+        "p50_ms": round(statistics.median(latencies), 2),
+        "p95_ms": round(percentile(latencies, 95), 2),
+        "p99_ms": round(percentile(latencies, 99), 2),
+        "mean_ms": round(statistics.mean(latencies), 2),
+        "rps": round(requests / elapsed, 1),
+        "measured_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "python": platform.python_version(),
+        "platform": f"{platform.system()} {platform.machine()}",
+        "database": "sqlite (aiosqlite)",
+    }
+
+
+def render(data: dict[str, Any]) -> str:
+    target = data.get("target_p95_ms")
+    verdict = "" if target is None else (" ✅" if data["p95_ms"] <= target else " ❌")
+    return "\n".join(
+        [
+            f"Measured {data['measured_at']} on {data['platform']}, Python {data['python']}, "
+            f"{data['database']}, single uvicorn worker.",
+            "",
+            "| Requests | Concurrency | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) "
+            "| req/s | errors | target p95 |",
+            "|---|---|---|---|---|---|---|---|---|",
+            f"| {data['requests']} | {data['concurrency']} | {data['p50_ms']} | {data['p95_ms']} | "
+            f"{data['p99_ms']} | {data['mean_ms']} | {data['rps']} | {data['errors']} | "
+            f"{target if target is not None else '-'} ms{verdict} |",
+        ]
+    )
+
+
+def write_block(path: Path, block: str) -> None:
+    text = path.read_text(encoding="utf-8") if path.exists() else "# Performance\n"
+    body = f"{BLOCK_START}\n{block}\n{BLOCK_END}"
+    if BLOCK_START in text and BLOCK_END in text:
+        head, _, rest = text.partition(BLOCK_START)
+        text = head + body + rest.partition(BLOCK_END)[2]
+    else:
+        text = text.rstrip() + "\n\n" + body + "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--requests", type=int, default=2000)
+    parser.add_argument("--concurrency", type=int, default=20)
+    parser.add_argument("--links", type=int, default=50)
+    parser.add_argument("--target-p95-ms", type=float, default=50.0)
+    parser.add_argument("--json", action="store_true", help="print one JSON line")
+    parser.add_argument("--write", type=Path, help="update the results block in a markdown file")
+    parser.add_argument("--render", help="render a JSON result as markdown and exit")
+    args = parser.parse_args()
+    if args.render:
+        print(render(json.loads(args.render)))
+        return 0
+    data = asyncio.run(measure(args.requests, args.concurrency, args.links))
+    data["target_p95_ms"] = args.target_p95_ms
+    if args.write:
+        write_block(args.write, render(data))
+    print(json.dumps(data) if args.json else render(data))
+    return 0 if data["errors"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

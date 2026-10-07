@@ -81,6 +81,20 @@ def _matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, p) for p in patterns)
 
 
+def _upgrade_section(lines: list[str]) -> str:
+    """Only DDL in ``upgrade()`` signals destructiveness; drops in ``downgrade()`` are expected."""
+    out: list[str] = []
+    inside = not any(ln.startswith("def upgrade") for ln in lines)
+    for ln in lines:
+        if ln.startswith("def upgrade"):
+            inside = True
+        elif ln.startswith("def ") and not ln.startswith("def upgrade"):
+            inside = False
+        elif inside:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def evaluate_autonomy(
     policy: AutonomyPolicy,
     node: TaskNode,
@@ -108,7 +122,9 @@ def evaluate_autonomy(
                 if any(re.search(cp, ln) for cp in trig.content_patterns for ln in lines):
                     hit = ", ".join(touched)
             if touched and trig.escalate_patterns:
-                body = "\n".join(ln for p, ln in added if p in touched)
+                body = "\n".join(
+                    _upgrade_section([ln for p, ln in added if p == f]) for f in touched
+                )
                 if any(re.search(ep, body) for ep in trig.escalate_patterns):
                     trig_risk = RiskLevel.HIGH
                     hit = f"{hit} (destructive operation detected)"

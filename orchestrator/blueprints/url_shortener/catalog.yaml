@@ -1,0 +1,432 @@
+# Capability catalog used by the deterministic Planner and Architect.
+# Each capability contributes typed task nodes (with entry/exit criteria, risk and effort) plus
+# design notes. `requires` pulls in hidden capabilities. Node `depends_on` entries naming nodes that
+# are not part of the selected plan are dropped; nodes left without dependencies hang off the design node.
+
+topics:            # first match (in this order) names the design/document nodes
+  core: architecture
+  analytics: analytics
+  expiry: analytics
+  alias_case_fix: analytics
+  caching: enterprise
+  rate_limiting: enterprise
+  api_key_auth: enterprise
+
+order: [core, schema_v2, alias_case_fix, expiry, analytics, enterprise_wiring, caching,
+        rate_limiting, observability, performance, auth_schema, api_key_auth]
+
+defaults:
+  implement_exit: [compiles, lint_clean, targeted_tests]
+  test_exit: [compiles, lint_clean, targeted_tests]
+
+capabilities:
+  core:
+    title: Core link management and redirect service
+    risk: medium
+    design:
+      components:
+        - "service.config / service.db / service.models - settings, async engine, Link model (UTC-safe timestamps)"
+        - "service.domain.codes - base62 CSPRNG codes, alias validation, reserved words"
+        - "service.domain.urls - scheme/host validation and normalisation"
+        - "service.links.LinkService + service.repository - use cases and SQL"
+        - "service.api.{links,redirect,health,middleware} - HTTP surface, pure-ASGI middleware"
+      decisions:
+        - ["302 by default (307 configurable)", "301 is cached forever by browsers, breaking disable/delete and analytics"]
+        - ["7-char random base62 codes with bounded retry", "62^7 = 3.5e12; per-insert collision p = n/62^7; no central counter to coordinate"]
+        - ["Soft delete + 410 Gone", "keeps audit history and prevents silent alias re-use"]
+        - ["Idempotency-Key stored on the link with a request fingerprint", "simple, transactional, survives restarts"]
+      data: "links(id, code UNIQUE, target_url, is_custom, tags JSON, disabled, created_at, updated_at, deleted_at, idempotency_key UNIQUE, request_fingerprint)"
+    nodes:
+      - id: implement.foundation
+        type: implement
+        title: Settings, DB layer, migration 0001, logging, errors, middleware, health
+        agent: Implementer
+        risk: medium
+        effort_points: 5
+        outputs: [code:foundation]
+        write_paths: [pyproject.toml, service/__init__.py, service/config.py, service/observability.py,
+                      service/errors.py, service/db.py, service/models.py, service/alembic.ini,
+                      service/migrations/**, service/api/__init__.py, service/api/middleware.py,
+                      service/api/deps.py, service/api/health.py, service/app.py, service/domain/__init__.py,
+                      tests/__init__.py, tests/service/__init__.py, tests/service/conftest.py,
+                      tests/service/test_health.py]
+        exit_criteria: [compiles, lint_clean, migrations_apply, targeted_tests]
+        params: {blueprint: greenfield/foundation, tests: [tests/service/test_health.py]}
+      - id: implement.codes
+        type: implement
+        title: Base62 code generation and alias validation
+        agent: Implementer
+        depends_on: [implement.foundation]
+        risk: low
+        effort_points: 2
+        outputs: [code:codes]
+        write_paths: [service/domain/codes.py, tests/service/test_codes.py]
+        params: {blueprint: greenfield/codes, tests: [tests/service/test_codes.py]}
+      - id: implement.urls
+        type: implement
+        title: URL validation and normalisation
+        agent: Implementer
+        depends_on: [implement.foundation]
+        risk: medium
+        effort_points: 3
+        outputs: [code:urls]
+        write_paths: [service/domain/urls.py, tests/service/test_urls.py]
+        params: {blueprint: greenfield/urls, tests: [tests/service/test_urls.py]}
+      - id: implement.links_api
+        type: implement
+        title: Links API, LinkService, repository and redirect
+        agent: Implementer
+        depends_on: [implement.codes, implement.urls]
+        inputs: [code:codes, code:urls]
+        risk: medium
+        effort_points: 5
+        outputs: [code:links_api]
+        write_paths: [service/schemas.py, service/repository.py, service/links.py, service/api/links.py,
+                      service/api/redirect.py, service/api/deps.py, service/app.py,
+                      tests/service/test_api_links.py]
+        params: {blueprint: greenfield/links_api, tests: [tests/service/test_api_links.py]}
+      - id: test.properties
+        type: test
+        title: Property-based tests (hypothesis) for codes and URLs
+        agent: TestEngineer
+        depends_on: [implement.links_api]
+        risk: low
+        effort_points: 2
+        outputs: [tests:properties]
+        write_paths: [tests/service/test_properties.py]
+        params: {blueprint: greenfield/test_properties, tests: [tests/service/test_properties.py]}
+      - id: test.integration
+        type: test
+        title: API integration tests incl. concurrency, collisions and migrations
+        agent: TestEngineer
+        depends_on: [implement.links_api]
+        risk: low
+        effort_points: 3
+        outputs: [tests:integration]
+        write_paths: [tests/service/test_integration.py]
+        params: {blueprint: greenfield/test_integration, tests: [tests/service/test_integration.py]}
+
+  schema_v2:
+    title: Schema v2 - clicks table and links.expires_at
+    risk: medium
+    hidden: true
+    nodes:
+      - id: implement.migration_0002
+        type: implement
+        title: Migration 0002 (clicks table, links.expires_at) and models
+        agent: Implementer
+        risk: medium
+        effort_points: 3
+        outputs: [code:schema_v2]
+        write_paths: [service/models.py, service/migrations/versions/rev_0002_clicks_and_expiry.py,
+                      tests/service/test_schema_v2.py]
+        exit_criteria: [compiles, lint_clean, migrations_apply, targeted_tests]
+        params: {blueprint: brownfield/migration_0002, tests: [tests/service/test_schema_v2.py]}
+
+  alias_case_fix:
+    title: Bug fix - aliases case-insensitive in lookup as in creation
+    risk: medium
+    design:
+      components: ["service.repository.LinkRepository.get_by_code - exact match, then canonical alias match"]
+      decisions:
+        - ["Exact match first, then lower-cased match restricted to is_custom rows", "keeps generated base62 codes case-sensitive while making aliases case-insensitive"]
+      data: "no schema change (aliases are already stored in canonical lower case)"
+    nodes:
+      - id: test.regression_alias
+        type: test
+        title: Regression test reproducing the alias case bug (must fail first)
+        agent: TestEngineer
+        risk: low
+        effort_points: 1
+        outputs: [tests:regression_alias]
+        write_paths: [tests/service/test_regression_alias_case.py]
+        exit_criteria: [compiles, lint_clean, tests_fail_first]
+        params: {blueprint: brownfield/regression_alias, tests: [tests/service/test_regression_alias_case.py]}
+      - id: implement.alias_fix
+        type: implement
+        title: Make alias lookup case-insensitive without breaking generated codes
+        agent: Implementer
+        depends_on: [test.regression_alias]
+        inputs: [tests:regression_alias]
+        risk: medium
+        effort_points: 2
+        outputs: [code:alias_fix]
+        write_paths: [service/repository.py]
+        params:
+          blueprint: brownfield/alias_fix
+          tests: [tests/service/test_regression_alias_case.py, tests/service/test_integration.py,
+                  tests/service/test_api_links.py]
+
+  expiry:
+    title: Link expiry
+    risk: medium
+    requires: [schema_v2]
+    design:
+      components: ["LinkCreate/LinkUpdate.expires_at, LinkOut.is_expired", "LinkService.resolve raises 410 for expired links"]
+      decisions:
+        - ["Expiry evaluated at read time", "no background job needed; exact to the request"]
+      data: "links.expires_at TIMESTAMPTZ NULL"
+    nodes:
+      - id: implement.expiry
+        type: implement
+        title: expires_at on create/patch, 410 for expired links
+        agent: Implementer
+        depends_on: [implement.migration_0002]
+        inputs: [code:schema_v2]
+        risk: medium
+        effort_points: 3
+        outputs: [code:expiry]
+        write_paths: [service/schemas.py, service/links.py, tests/service/test_expiry.py]
+        params: {blueprint: brownfield/expiry, tests: [tests/service/test_expiry.py, tests/service/test_api_links.py]}
+
+  analytics:
+    title: Click analytics
+    risk: medium
+    requires: [schema_v2]
+    design:
+      components:
+        - "service.analytics - ClickRecorder (bounded asyncio queue + background batch writer), visitor hashing, UA/referrer parsing, stats queries, retention purge"
+        - "service.api.stats - GET /api/v1/links/{code}/stats"
+      decisions:
+        - ["In-process bounded queue + batch writer", "keeps DB writes off the redirect path; drops (and counts) on overflow instead of adding latency"]
+        - ["visitor = sha256(HMAC(secret, day) + ip + ua)", "unique visitors per day without storing PII; salts rotate daily so hashes cannot be joined across days"]
+        - ["Retention purge on a timer (analytics_retention_days)", "compliance policy CMP-003"]
+      data: "clicks(id, link_id FK, occurred_at, day, visitor_hash, referrer_host, ua_family)"
+    nodes:
+      - id: implement.analytics
+        type: implement
+        title: Click recording off the hot path, stats endpoint, retention
+        agent: Implementer
+        depends_on: [implement.expiry, implement.migration_0002]
+        inputs: [code:schema_v2]
+        risk: medium
+        effort_points: 5
+        outputs: [code:analytics]
+        write_paths: [service/analytics.py, service/api/stats.py, service/api/redirect.py, service/app.py,
+                      service/config.py, tests/service/test_analytics_unit.py]
+        params: {blueprint: brownfield/analytics, tests: [tests/service/test_analytics_unit.py]}
+      - id: test.analytics
+        type: test
+        title: Stats API and failure-isolation tests
+        agent: TestEngineer
+        depends_on: [implement.analytics]
+        risk: low
+        effort_points: 2
+        outputs: [tests:analytics]
+        write_paths: [tests/service/test_stats_api.py]
+        params: {blueprint: brownfield/test_analytics, tests: [tests/service/test_stats_api.py]}
+
+  enterprise_wiring:
+    title: Integrate cache, rate limiter and metrics into the app
+    risk: medium
+    hidden: true
+    nodes:
+      - id: implement.enterprise_wiring
+        type: implement
+        title: Wire cache, rate limiting and metrics into config, app, routes and service
+        agent: Implementer
+        depends_on: [implement.cache_backend, implement.rate_limiter, implement.metrics]
+        inputs: [code:cache, code:ratelimit, code:metrics]
+        risk: medium
+        effort_points: 5
+        outputs: [code:enterprise_wiring]
+        write_paths: [pyproject.toml, service/config.py, service/app.py, service/api/deps.py,
+                      service/api/redirect.py, service/api/links.py, service/links.py, service/api/health.py,
+                      tests/service/test_enterprise.py, tests/service/test_health.py]
+        params: {blueprint: ambiguous/enterprise_wiring, tests: [tests/service/test_enterprise.py, tests/service/test_api_links.py, tests/service/test_stats_api.py]}
+
+  caching:
+    title: Read-through redirect cache
+    risk: medium
+    requires: [enterprise_wiring]
+    design:
+      components: ["service.cache - Cache protocol, bounded in-memory TTL LRU, Redis backend"]
+      decisions:
+        - ["Read-through cache of the resolved link (positive + short negative TTL)", "removes the DB from the hot path; negative caching blunts enumeration"]
+        - ["Invalidate on PATCH/DELETE", "correctness over hit rate for state changes"]
+      data: "cache key link:{code} -> {target, gone, expires_at}"
+    nodes:
+      - id: implement.cache_backend
+        type: implement
+        title: Cache abstraction with in-memory and Redis backends
+        agent: Implementer
+        risk: low
+        effort_points: 3
+        outputs: [code:cache]
+        write_paths: [service/cache.py, tests/service/test_cache.py]
+        params: {blueprint: ambiguous/cache_backend, tests: [tests/service/test_cache.py]}
+
+  rate_limiting:
+    title: Token-bucket rate limiting
+    risk: medium
+    requires: [enterprise_wiring]
+    design:
+      components: ["service.ratelimit - token bucket (in-memory, Redis Lua for atomicity)"]
+      decisions:
+        - ["Per API key for writes, per client IP for redirects", "fairness for authenticated clients, abuse protection for public traffic"]
+        - ["429 with Retry-After and X-RateLimit-* headers", "standard, client-friendly back-off signal"]
+      data: "bucket state {tokens, updated_at} per key"
+    nodes:
+      - id: implement.rate_limiter
+        type: implement
+        title: Token bucket limiter (memory + Redis)
+        agent: Implementer
+        risk: low
+        effort_points: 3
+        outputs: [code:ratelimit]
+        write_paths: [service/ratelimit.py, tests/service/test_ratelimit.py]
+        params: {blueprint: ambiguous/rate_limiter, tests: [tests/service/test_ratelimit.py]}
+
+  observability:
+    title: Prometheus metrics
+    risk: low
+    requires: [enterprise_wiring]
+    design:
+      components: ["service.metrics - per-app registry, request/redirect/cache/rate-limit/analytics metrics, /metrics"]
+      decisions: [["Per-app CollectorRegistry", "isolated in tests, no global state"]]
+      data: "n/a"
+    nodes:
+      - id: implement.metrics
+        type: implement
+        title: Prometheus metrics module and middleware
+        agent: Implementer
+        risk: low
+        effort_points: 2
+        outputs: [code:metrics]
+        write_paths: [service/metrics.py, tests/service/test_metrics.py]
+        params: {blueprint: ambiguous/metrics, tests: [tests/service/test_metrics.py]}
+
+  performance:
+    title: Redirect latency target
+    risk: low
+    requires: [enterprise_wiring]
+    design:
+      components: ["scripts/loadcheck.py - starts uvicorn, seeds links, measures p50/p95 redirect latency"]
+      decisions: [["p95 < 50 ms @ 20 concurrent clients (laptop, SQLite) enforced as a gate", "a concrete, repeatable number replaces 'faster'"]]
+      data: "n/a"
+    nodes:
+      - id: implement.loadcheck
+        type: implement
+        title: Load-sanity script for redirect latency
+        agent: Implementer
+        risk: low
+        effort_points: 2
+        outputs: [code:loadcheck]
+        write_paths: [scripts/loadcheck.py]
+        exit_criteria: [compiles, lint_clean]
+        params: {blueprint: ambiguous/loadcheck}
+      - id: test.performance
+        type: test
+        title: Measure redirect p50/p95 against the target
+        agent: TestEngineer
+        depends_on: [implement.enterprise_wiring, implement.loadcheck, implement.api_key_auth]
+        risk: low
+        effort_points: 1
+        outputs: [performance]
+        write_paths: [docs/PERFORMANCE.md]
+        exit_criteria: [p95_under_target]
+        params: {mode: performance, target_p95_ms: 50, requests: 600, concurrency: 20}
+
+  auth_schema:
+    title: Schema v3 - api_keys table and links.owner_key_id
+    risk: medium
+    hidden: true
+    nodes:
+      - id: implement.auth_migration
+        type: implement
+        title: Migration 0003 (api_keys, links.owner_key_id) and models
+        agent: Implementer
+        risk: medium
+        effort_points: 2
+        outputs: [code:auth_schema]
+        write_paths: [service/models.py, service/migrations/versions/rev_0003_api_keys.py,
+                      tests/service/test_schema_v3.py]
+        exit_criteria: [compiles, lint_clean, migrations_apply, targeted_tests]
+        params: {blueprint: ambiguous/auth_migration, tests: [tests/service/test_schema_v3.py]}
+
+  api_key_auth:
+    title: API-key authentication on write endpoints
+    risk: high
+    requires: [auth_schema, enterprise_wiring]
+    design:
+      components: ["service.auth - key generation (usk_<prefix>_<secret>), SHA-256 at rest, constant-time verify, require_api_key dependency", "service.cli - create/revoke keys"]
+      decisions:
+        - ["Opaque random keys hashed with SHA-256 (keys have 256 bits of entropy, so a slow KDF adds nothing)", "fast verification on every write without storing secrets"]
+        - ["Owner-only PATCH/DELETE", "prevents one tenant modifying another tenant's links"]
+      data: "api_keys(id, name, prefix UNIQUE, key_hash, created_at, revoked_at); links.owner_key_id FK NULL"
+    nodes:
+      - id: implement.api_key_auth
+        type: implement
+        title: Require X-API-Key on writes; owner-only modifications; key CLI
+        agent: Implementer
+        depends_on: [implement.enterprise_wiring, implement.auth_migration]
+        inputs: [code:auth_schema, code:enterprise_wiring]
+        risk: high
+        effort_points: 5
+        outputs: [code:auth]
+        write_paths: [service/auth.py, service/cli.py, service/api/deps.py, service/api/links.py,
+                      service/links.py, service/config.py, tests/service/conftest.py, tests/service/test_auth.py,
+                      tests/service/test_api_links.py, tests/service/test_stats_api.py,
+                      tests/service/test_enterprise.py]
+        params:
+          blueprint: ambiguous/api_key_auth
+          tests: [tests/service/test_auth.py, tests/service/test_api_links.py, tests/service/test_integration.py,
+                  tests/service/test_enterprise.py]
+      - id: test.auth_security
+        type: test
+        title: Abuse tests for authentication and authorization
+        agent: TestEngineer
+        depends_on: [implement.api_key_auth]
+        risk: low
+        effort_points: 2
+        outputs: [tests:auth_security]
+        write_paths: [tests/service/test_auth_security.py]
+        params: {blueprint: ambiguous/test_auth_security, tests: [tests/service/test_auth_security.py]}
+
+# Acceptance criteria used when the requirement is free text (no explicit criteria given).
+acceptance:
+  caching:
+    - id: AC-C1
+      given: a link that was resolved once
+      when: it is followed again
+      then: the redirect is served from cache without a database lookup
+      verified_by: [tests/service/test_enterprise.py::test_redirect_is_served_from_cache]
+    - id: AC-C2
+      given: a cached link
+      when: it is disabled or deleted
+      then: the next redirect reflects the change
+      verified_by: [tests/service/test_enterprise.py::test_cache_is_invalidated_on_update_and_delete]
+  rate_limiting:
+    - id: AC-R1
+      given: a client over its rate limit
+      when: it sends another request
+      then: the API returns 429 with Retry-After
+      verified_by: [tests/service/test_enterprise.py::test_rate_limit_returns_429_with_retry_after]
+  observability:
+    - id: AC-O1
+      given: traffic has been served
+      when: Prometheus scrapes /metrics
+      then: request, redirect and cache metrics are exposed
+      verified_by: [tests/service/test_enterprise.py::test_metrics_endpoint_exposes_counters]
+  performance:
+    - id: AC-P1
+      given: 20 concurrent clients
+      when: they follow links
+      then: p95 redirect latency is under 50 ms
+      verified_by: ["gate:p95_under_target"]
+  api_key_auth:
+    - id: AC-A1
+      given: no or an invalid X-API-Key
+      when: a client calls a write endpoint
+      then: the API returns 401
+      verified_by: [tests/service/test_auth.py::test_write_endpoints_require_a_valid_key]
+    - id: AC-A2
+      given: a link created by key A
+      when: key B tries to modify or delete it
+      then: the API returns 403
+      verified_by: [tests/service/test_auth_security.py::test_only_the_owner_can_modify_a_link]
+    - id: AC-A3
+      given: an API key
+      when: it is stored
+      then: only its SHA-256 hash is persisted
+      verified_by: [tests/service/test_auth.py::test_keys_are_hashed_at_rest]

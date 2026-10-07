@@ -3,7 +3,8 @@
 Definitions (also in docs/OPERATIONS.md):
 
 * node success rate  = succeeded / (succeeded + failed + blocked)
-* retry rate         = retries / attempts  (attempt = a RUNNING transition)
+* retry rate         = retries / attempts  (retry = a RETRYING transition; attempt = RUNNING)
+* reruns             = nodes re-executed because a re-plan invalidated them (not retries)
 * rollback frequency = rollbacks / attempts of write nodes
 * fallback frequency = LLM calls served by the fallback provider / all LLM calls
 * MTTR               = mean time from an attempt failing to that node succeeding
@@ -56,8 +57,12 @@ def run_metrics(store: StateStore) -> dict[str, Any]:
 
     attempts = [e for e in events if e["to_state"] == NodeState.RUNNING.value]
     attempts = [e for e in attempts if e["from_state"] != NodeState.AWAITING_APPROVAL.value]
-    executed_nodes = {e["node_id"] for e in attempts}
-    retries = max(len(attempts) - len(executed_nodes), 0)
+    retries = sum(1 for e in events if e["to_state"] == NodeState.RETRYING.value)
+    reruns = sum(
+        1
+        for e in events
+        if e["to_state"] == NodeState.PENDING.value and "invalidated" in (e["reason"] or "")
+    )
     write_attempts = [e for e in attempts if _is_write(nodes.get(e["node_id"]))]
     rollbacks = sum(1 for e in events if e["to_state"] == NodeState.ROLLED_BACK.value)
 
@@ -118,6 +123,7 @@ def run_metrics(store: StateStore) -> dict[str, Any]:
         "attempts": len(attempts),
         "retries": retries,
         "retry_rate": _ratio(retries, len(attempts)),
+        "reruns_after_replan": reruns,
         "rollbacks": rollbacks,
         "rollback_frequency": _ratio(rollbacks, len(write_attempts)),
         "llm_calls": len(llm),

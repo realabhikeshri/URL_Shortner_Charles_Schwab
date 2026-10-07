@@ -1,0 +1,25 @@
+summary: Service foundation - settings, async DB layer, initial migration, logging, errors, middleware, health probes
+rationale: >-
+  Everything the feature nodes share is built first so they can proceed in parallel: pydantic-settings
+  config (12-factor, SHORTENER_ prefix), SQLAlchemy 2.0 async engine with a UTC-safe datetime type,
+  Alembic migration 0001 (links table, unique code + idempotency key), JSON logging with request ids,
+  a single error envelope, pure-ASGI middleware (request id, security headers, body size limit) and
+  liveness/readiness probes. Test fixtures migrate a template DB once and copy it per test.
+alternatives:
+  - "Base.metadata.create_all instead of Alembic: rejected, schema history and reversible migrations are required"
+  - "BaseHTTPMiddleware: rejected, pure ASGI avoids its known streaming/background-task pitfalls"
+ops:
+  - op: replace
+    path: pyproject.toml
+    old: "dependencies = []"
+    new: |-
+      dependencies = [
+          "fastapi>=0.115",
+          "uvicorn[standard]>=0.30",
+          "pydantic>=2.7",
+          "pydantic-settings>=2.3",
+          "sqlalchemy[asyncio]>=2.0.30",
+          "aiosqlite>=0.20",
+          "asyncpg>=0.29",
+          "alembic>=1.13",
+      ]

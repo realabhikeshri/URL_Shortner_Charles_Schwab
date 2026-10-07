@@ -1,0 +1,25 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "changelog_added": [
+        "Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key. (REQ-GF-001)",
+        "Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links. (REQ-GF-001)",
+        "Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE. (REQ-GF-001)",
+        "Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes. (REQ-GF-001)",
+        "Persist links in a relational database managed by reversible migrations. (REQ-GF-001)"
+      ],
+      "changelog_changed": [],
+      "changelog_fixed": [],
+      "changelog_security": [],
+      "readme": "# URL Shortener\n\nA production-minded URL shortener (FastAPI, SQLAlchemy 2.0 async, Alembic). Built and evolved by the agentic SDLC orchestrator; every change traces to a run in `runs/`.\n\n## Run\n\n```bash\nuvicorn service.app:create_app --factory --port 8000\n```\n\n## Endpoints\n\n| Method | Path | Summary |\n|---|---|---|\n| GET | `/healthz` | Liveness probe |\n| GET | `/readyz` | Readiness probe (database reachable) |\n| POST | `/api/v1/links` | create link |\n| GET | `/api/v1/links/{code}` | get link |\n| PATCH | `/api/v1/links/{code}` | update link |\n| DELETE | `/api/v1/links/{code}` | delete link |\n| GET | `/{code}` | follow |\n\nFull reference: `docs/service/API.md`; OpenAPI: `docs/openapi.json`.\n\n## Configuration\n\nAll settings are environment variables with the `SHORTENER_` prefix:\n\n- `SHORTENER_ALLOW_PRIVATE_HOSTS`\n- `SHORTENER_APP_NAME`\n- `SHORTENER_BASE_URL`\n- `SHORTENER_CODE_LENGTH`\n- `SHORTENER_CODE_MAX_ATTEMPTS`\n- `SHORTENER_CORS_ORIGINS`\n- `SHORTENER_DATABASE_URL`\n- `SHORTENER_DB_AUTO_MIGRATE`\n- `SHORTENER_DB_POOL_SIZE`\n- `SHORTENER_ENVIRONMENT`\n- `SHORTENER_HSTS_ENABLED`\n- `SHORTENER_LOG_JSON`\n- `SHORTENER_LOG_LEVEL`\n- `SHORTENER_MAX_REQUEST_BODY_BYTES`\n- `SHORTENER_MAX_URL_LENGTH`\n- `SHORTENER_REDIRECT_STATUS_CODE`\n\n## Requirements implemented\n\nLatest change: **REQ-GF-001 - URL shortener core service**\n\n- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.\n- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.\n- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.\n- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.\n- Persist links in a relational database managed by reversible migrations.\n"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 1217,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 653
+  },
+  "role": "DocWriter",
+  "schema": "DocDraft",
+  "task": "document"
+}

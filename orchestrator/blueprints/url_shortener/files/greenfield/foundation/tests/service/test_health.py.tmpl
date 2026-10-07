@@ -1,0 +1,130 @@
+# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+import json
+import logging
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from service.app import create_app
+from service.config import Settings
+from service.db import Database
+from service.observability import JsonFormatter, request_id_var
+
+
+async def test_liveness(client: AsyncClient) -> None:
+    resp = await client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+async def test_readiness_ok_and_failing_database(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (await client.get("/readyz")).json()["checks"]["database"] == "ok"
+
+    async def broken(self: Database) -> bool:
+        raise ConnectionError("db down")
+
+    monkeypatch.setattr(Database, "ping", broken)
+    resp = await client.get("/readyz")
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "not_ready", "checks": {"database": "unavailable"}}
+
+
+async def test_security_headers_and_request_id(client: AsyncClient) -> None:
+    resp = await client.get("/healthz", headers={"X-Request-ID": "abc-123"})
+    assert resp.headers["X-Request-ID"] == "abc-123"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert "default-src 'none'" in resp.headers["Content-Security-Policy"]
+    generated = await client.get("/healthz", headers={"X-Request-ID": "bad id with spaces!"})
+    assert generated.headers["X-Request-ID"] != "bad id with spaces!"
+    assert len(generated.headers["X-Request-ID"]) == 32
+
+
+async def test_docs_page_has_no_restrictive_csp(client: AsyncClient) -> None:
+    resp = await client.get("/docs")
+    assert resp.status_code == 200
+    assert "Content-Security-Policy" not in resp.headers
+
+
+async def test_unknown_route_uses_error_envelope(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/nothing-here")
+    assert resp.status_code == 404
+    body = resp.json()["error"]
+    assert body["code"] == "not_found"
+    assert body["request_id"] == resp.headers["X-Request-ID"]
+    wrong_method = await client.put("/healthz")
+    assert wrong_method.status_code == 405
+    assert wrong_method.json()["error"]["code"] == "method_not_allowed"
+
+
+async def test_oversized_body_is_rejected(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/links", content=b"x" * 20_000, headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "payload_too_large"
+
+
+async def test_unhandled_errors_return_500_envelope(settings: Settings) -> None:
+    app: FastAPI = create_app(settings)
+
+    @app.get("/api/v1/boom")
+    async def boom() -> None:
+        raise RuntimeError("kaboom")
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            resp = await c.get("/api/v1/boom")
+    assert resp.status_code == 500
+    assert resp.json()["error"]["code"] == "internal_error"
+    assert "kaboom" not in resp.text
+
+
+async def test_cors_and_hsts_when_configured(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={"cors_origins": ["https://app.example.com"], "hsts_enabled": True}
+    )
+    app = create_app(configured)
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        resp = await c.get("/healthz", headers={"Origin": "https://app.example.com"})
+    assert resp.headers["access-control-allow-origin"] == "https://app.example.com"
+    assert "max-age" in resp.headers["Strict-Transport-Security"]
+
+
+async def test_startup_runs_migrations_on_a_fresh_database(tmp_path: object) -> None:
+    from pathlib import Path
+
+    db = Path(str(tmp_path)) / "fresh.db"
+    app = create_app(Settings(database_url=f"sqlite+aiosqlite:///{db}", log_json=False))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        assert (await c.get("/readyz")).status_code == 200
+    assert db.exists()
+
+
+def test_json_formatter_includes_request_id_and_extras() -> None:
+    token = request_id_var.set("rid-1")
+    try:
+        record = logging.LogRecord("service.x", logging.INFO, __file__, 1, "hello %s", ("w",), None)
+        record.route = "/x"
+        out = json.loads(JsonFormatter().format(record))
+    finally:
+        request_id_var.reset(token)
+    assert out["message"] == "hello w"
+    assert out["request_id"] == "rid-1"
+    assert out["route"] == "/x"
+    assert out["level"] == "INFO"
+
+
+def test_settings_strip_trailing_slash() -> None:
+    assert Settings(base_url="https://s.io/").base_url == "https://s.io"

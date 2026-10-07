@@ -1,0 +1,9 @@
+summary: Base62 short-code generation (CSPRNG) and custom-alias validation with reserved words
+rationale: >-
+  7 random base62 characters give 62^7 = 3.5e12 codes; per-insert collision probability is n/62^7,
+  so a bounded retry (5) plus the DB unique constraint is sufficient and avoids a central counter.
+  Aliases are validated by regex (3-32 chars) and checked against reserved route names.
+alternatives:
+  - "Sequential ids encoded in base62: rejected, enumerable and leaks volume"
+  - "Hash of the URL: rejected, same URL from different users would collide by design"
+ops: []

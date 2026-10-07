@@ -1,0 +1,10 @@
+# Scripted mid-run events for the ambiguous scenario (demo reproducibility).
+# They only *change inputs*; detection and re-planning are done by the engine's generic
+# hash-based change detection, exactly as if a human had edited the run's requirement file.
+- after_node: design.enterprise
+  action: amend_requirement
+  note: answer to open question Q-1 from the security review
+  append: |
+    Update from security review: enterprise-ready requires API-key authentication on all write
+    endpoints (create, update, delete). Keys must be stored hashed and only the owning key may
+    modify or delete a link.

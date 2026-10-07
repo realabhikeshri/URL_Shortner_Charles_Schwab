@@ -1,0 +1,35 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "alternatives": [
+        "Resolve DNS to block private targets: deferred, adds latency and is racy (DNS rebinding); documented"
+      ],
+      "ops": [
+        {
+          "content": "# lineage: REQ-GF-001 / implement.urls (see runs/ for the decision trail)\n\"\"\"Target-URL validation and normalisation.\n\nRules: http/https only (javascript:, data:, file: and every other scheme are rejected), at most\n``max_length`` characters, a host is required, no embedded credentials (a phishing vector), and\nby default no loopback/private/link-local/reserved IP literals or local-only host names.\nNormalisation lower-cases scheme and host, IDNA-encodes the host, drops default ports and\ngives an empty path a ``/``. DNS is not resolved here (see docs/LIMITATIONS.md).\n\"\"\"\n\nimport ipaddress\nfrom urllib.parse import urlsplit, urlunsplit\n\nALLOWED_SCHEMES = frozenset({\"http\", \"https\"})\nDEFAULT_PORTS = {\"http\": 80, \"https\": 443}\nLOCAL_SUFFIXES = (\".localhost\", \".local\", \".internal\", \".localdomain\")\n\n\nclass UrlError(ValueError):\n    \"\"\"The URL is not acceptable as a redirect target.\"\"\"\n\n\ndef _is_forbidden_ip(host: str) -> bool:\n    try:\n        ip = ipaddress.ip_address(host)\n    except ValueError:\n        return False\n    return (\n        ip.is_private\n        or ip.is_loopback\n        or ip.is_link_local\n        or ip.is_reserved\n        or ip.is_multicast\n        or ip.is_unspecified\n    )\n\n\ndef normalize_url(raw: str, *, max_length: int = 2048, allow_private: bool = False) -> str:\n    url = raw.strip()\n    if not url:\n        raise UrlError(\"url is empty\")\n    if len(url) > max_length:\n        raise UrlError(f\"url exceeds {max_length} characters\")\n    if any(ch in url for ch in \"\\r\\n\\t\\x00\") or \" \" in url:\n        raise UrlError(\"url contains whitespace or control characters\")\n    parts = urlsplit(url)\n    scheme = parts.scheme.lower()\n    if scheme not in ALLOWED_SCHEMES:\n        raise UrlError(f\"scheme '{scheme or '(none)'}' is not allowed; use http or https\")\n    if parts.username is not None or parts.password is not None:\n        raise UrlError(\"urls with embedded credentials are not allowed\")\n    host = parts.hostname\n    if not host:\n        raise UrlError(\"url has no host\")\n    try:\n        port = parts.port\n    except ValueError as exc:\n        raise UrlError(\"url has an invalid port\") from exc\n    try:\n        ascii_host = host.encode(\"idna\").decode(\"ascii\").lower() if not host.isascii() else host\n    except UnicodeError as exc:\n        raise UrlError(\"url host is not a valid domain name\") from exc\n    ascii_host = ascii_host.lower().rstrip(\".\")\n    if not allow_private:\n        if _is_forbidden_ip(ascii_host):\n            raise UrlError(\"private, loopback and reserved addresses are not allowed\")\n        if ascii_host == \"localhost\" or ascii_host.endswith(LOCAL_SUFFIXES):\n            raise UrlError(\"local host names are not allowed\")\n    netloc = f\"[{ascii_host}]\" if \":\" in ascii_host else ascii_host\n    if port is not None and port != DEFAULT_PORTS[scheme]:\n        netloc = f\"{netloc}:{port}\"\n    path = parts.path or \"/\"\n    normalized = urlunsplit((scheme, netloc, path, parts.query, parts.fragment))\n    if len(normalized) > max_length:\n        raise UrlError(f\"url exceeds {max_length} characters\")\n    return normalized\n",
+          "new": null,
+          "old": null,
+          "op": "write",
+          "path": "service/domain/urls.py"
+        },
+        {
+          "content": "# lineage: REQ-GF-001 / implement.urls (see runs/ for the decision trail)\nimport pytest\n\nfrom service.domain.urls import UrlError, normalize_url\n\n\n@pytest.mark.parametrize(\n    (\"raw\", \"expected\"),\n    [\n        (\"https://Example.COM\", \"https://example.com/\"),\n        (\"HTTP://example.com:80/a?b=1#c\", \"http://example.com/a?b=1#c\"),\n        (\"https://example.com:8443/x\", \"https://example.com:8443/x\"),\n        (\"https://b\u00fccher.example/\", \"https://xn--bcher-kva.example/\"),\n        (\"  https://example.com/path  \", \"https://example.com/path\"),\n        (\"https://[2606:4700::1111]/\", \"https://[2606:4700::1111]/\"),\n    ],\n)\ndef test_valid_urls_are_normalised(raw: str, expected: str) -> None:\n    assert normalize_url(raw) == expected\n\n\n@pytest.mark.parametrize(\n    \"raw\",\n    [\n        \"javascript:alert(1)\",\n        \"data:text/html,<script>alert(1)</script>\",\n        \"file:///etc/passwd\",\n        \"ftp://example.com/x\",\n        \"example.com\",\n        \"https://\",\n        \"https://user:pass@example.com/\",\n        \"https://example.com:99999/\",\n        \"https://exa mple.com/\",\n        \"https://example.com/\\nheader\",\n        \"\",\n    ],\n)\ndef test_unsafe_or_malformed_urls_are_rejected(raw: str) -> None:\n    with pytest.raises(UrlError):\n        normalize_url(raw)\n\n\n@pytest.mark.parametrize(\n    \"raw\",\n    [\n        \"http://127.0.0.1/\",\n        \"http://10.0.0.5/admin\",\n        \"http://192.168.1.1/\",\n        \"http://169.254.169.254/latest/meta-data\",\n        \"http://[::1]/\",\n        \"http://localhost:8000/\",\n        \"http://printer.local/\",\n        \"http://0.0.0.0/\",\n    ],\n)\ndef test_private_and_local_targets_are_rejected_by_default(raw: str) -> None:\n    with pytest.raises(UrlError):\n        normalize_url(raw)\n    assert normalize_url(raw, allow_private=True).startswith(\"http://\")\n\n\ndef test_length_limit() -> None:\n    url = \"https://example.com/\" + \"a\" * 2100\n    with pytest.raises(UrlError, match=\"exceeds\"):\n        normalize_url(url)\n    assert normalize_url(url, max_length=4096) == url\n",
+          "new": null,
+          "old": null,
+          "op": "write",
+          "path": "tests/service/test_urls.py"
+        }
+      ],
+      "rationale": "Shorteners are abused for phishing and SSRF-style probing. Only http/https are accepted, embedded credentials are rejected, private/loopback/link-local IP literals and local host names are refused by default (configurable), and the URL is normalised so equivalent inputs store identically.",
+      "summary": "Target URL validation and normalisation (http/https only, no private hosts, no credentials)"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 263,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 1631
+  },
+  "role": "Implementer",
+  "schema": "ChangeSet",
+  "task": "implement"
+}

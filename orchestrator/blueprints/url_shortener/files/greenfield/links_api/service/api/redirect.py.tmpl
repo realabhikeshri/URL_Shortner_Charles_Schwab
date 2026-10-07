@@ -1,0 +1,30 @@
+# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+"""Public redirect endpoint (registered last so fixed routes win)."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Path
+from fastapi.responses import RedirectResponse
+
+from service.api.deps import get_link_service
+from service.links import LinkService
+
+router = APIRouter(tags=["redirect"])
+
+
+@router.get(
+    "/{code}",
+    status_code=302,
+    response_class=RedirectResponse,
+    responses={404: {"description": "Unknown code"}, 410: {"description": "Expired or disabled"}},
+)
+async def follow(
+    code: Annotated[str, Path(min_length=1, max_length=64)],
+    service: Annotated[LinkService, Depends(get_link_service)],
+) -> RedirectResponse:
+    link = await service.resolve(code)
+    return RedirectResponse(
+        link.target_url,
+        status_code=service.settings.redirect_status_code,
+        headers={"Cache-Control": "private, no-store"},
+    )

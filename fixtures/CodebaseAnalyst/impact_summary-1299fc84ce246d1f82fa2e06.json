@@ -1,0 +1,19 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "recommendations": [
+        "Establish migrations, tests and CI gates from the first change."
+      ],
+      "risk": "low",
+      "summary": "Empty workspace: greenfield build, no existing code is impacted."
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 136,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 42
+  },
+  "role": "CodebaseAnalyst",
+  "schema": "ImpactNarrative",
+  "task": "impact_summary"
+}

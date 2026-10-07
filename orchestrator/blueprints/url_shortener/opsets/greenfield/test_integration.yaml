@@ -1,0 +1,6 @@
+summary: Integration tests - lifecycle, case-sensitive generated codes, collision retry, concurrency, idempotency races, migrations
+rationale: >-
+  Exercises the API end-to-end against a real migrated SQLite database, including the concurrency and
+  retry paths that unit tests cannot reach, and proves migrations upgrade/downgrade cleanly.
+alternatives: ["Mocks for the database: rejected, would not catch constraint/race behaviour"]
+ops: []

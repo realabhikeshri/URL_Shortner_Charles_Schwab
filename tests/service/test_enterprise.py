@@ -1,0 +1,180 @@
+# lineage: REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+"""Caching, rate limiting, metrics and readiness wired into the running app."""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
+
+import fakeredis
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from service import app as app_module
+from service.app import create_app
+from service.config import Settings
+from service.repository import LinkRepository
+from tests.service.conftest import authed, issue_key
+
+
+@asynccontextmanager
+async def started(
+    settings: Settings, **overrides: Any
+) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
+    app = create_app(settings.model_copy(update=overrides))
+    async with app.router.lifespan_context(app):
+        if not app.state.settings.auth_enabled:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+                yield app, client
+            return
+        async with authed(app, await issue_key(app), "http://t") as client:
+            yield app, client
+
+
+def forbid_db_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(self: LinkRepository, code: str) -> None:
+        raise AssertionError(f"database lookup for {code} should have been served from cache")
+
+    monkeypatch.setattr(LinkRepository, "get_by_code", boom)
+
+
+async def test_redirect_is_served_from_cache(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com/c"})).json()["code"]
+    assert (await client.get(f"/{code}")).status_code == 302  # miss -> populates cache
+    forbid_db_lookups(monkeypatch)
+    resp = await client.get(f"/{code}")
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://e.com/c"
+
+
+async def test_cache_is_invalidated_on_update_and_delete(client: AsyncClient) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com/i"})).json()["code"]
+    assert (await client.get(f"/{code}")).status_code == 302
+    await client.patch(f"/api/v1/links/{code}", json={"disabled": True})
+    assert (await client.get(f"/{code}")).status_code == 410
+    await client.patch(f"/api/v1/links/{code}", json={"disabled": False})
+    assert (await client.get(f"/{code}")).status_code == 302
+    await client.delete(f"/api/v1/links/{code}")
+    assert (await client.get(f"/{code}")).status_code == 410
+
+
+async def test_unknown_codes_are_negatively_cached_and_cleared_on_create(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert (await client.get("/later-alias")).status_code == 404
+    created = await client.post(
+        "/api/v1/links", json={"url": "https://e.com/n", "custom_alias": "later-alias"}
+    )
+    assert created.status_code == 201
+    assert (await client.get("/later-alias")).status_code == 302  # marker was invalidated
+    assert (await client.get("/never-exists")).status_code == 404
+    forbid_db_lookups(monkeypatch)
+    assert (await client.get("/never-exists")).status_code == 404  # served from the negative cache
+
+
+async def test_alias_case_variants_share_the_canonical_entry(client: AsyncClient) -> None:
+    await client.post("/api/v1/links", json={"url": "https://e.com/p", "custom_alias": "Promo"})
+    assert (await client.get("/Promo")).status_code == 302
+    await client.patch("/api/v1/links/promo", json={"disabled": True})
+    assert (await client.get("/PROMO")).status_code == 410  # no stale variant entry
+
+
+async def test_rate_limit_returns_429_with_retry_after(settings: Settings) -> None:
+    async with started(
+        settings, rate_limit_write_capacity=2, rate_limit_write_refill_per_s=0.01
+    ) as (_app, c):
+        statuses = [
+            (await c.post("/api/v1/links", json={"url": f"https://e.com/{i}"})).status_code
+            for i in range(3)
+        ]
+        assert statuses == [201, 201, 429]
+        limited = await c.post("/api/v1/links", json={"url": "https://e.com/x"})
+        assert limited.json()["error"]["code"] == "rate_limited"
+        assert int(limited.headers["Retry-After"]) >= 1
+        assert limited.headers["X-RateLimit-Limit"] == "2"
+        body = (await c.get("/metrics")).text
+        assert 'rate_limited_total{scope="write"} 2.0' in body
+
+
+async def test_redirects_are_rate_limited_per_client(settings: Settings) -> None:
+    async with started(
+        settings, rate_limit_redirect_capacity=2, rate_limit_redirect_refill_per_s=0.01
+    ) as (app, c):
+        code = (await c.post("/api/v1/links", json={"url": "https://e.com/r"})).json()["code"]
+        assert [(await c.get(f"/{code}")).status_code for _ in range(3)] == [302, 302, 429]
+        other = AsyncClient(
+            transport=ASGITransport(app=app, client=("198.51.100.9", 1)), base_url="http://t"
+        )
+        async with other:
+            assert (await other.get(f"/{code}")).status_code == 302
+
+
+async def test_metrics_endpoint_exposes_counters(client: AsyncClient) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com/m"})).json()["code"]
+    await client.get(f"/{code}")
+    await client.get(f"/{code}")
+    resp = await client.get("/metrics")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'redirects_total{outcome="ok"} 2.0' in body
+    assert 'link_cache_requests_total{result="hit"} 1.0' in body
+    assert 'link_cache_requests_total{result="miss"} 1.0' in body
+    assert 'http_requests_total{method="GET",route="/{code}",status="302"} 2.0' in body
+    assert "analytics_queue_depth" in body
+
+
+async def test_readyz_reports_cache_and_fails_when_it_is_down(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ok = await client.get("/readyz")
+    assert ok.json()["checks"] == {"database": "ok", "cache:memory": "ok"}
+
+    async def down() -> bool:
+        raise ConnectionError("cache unreachable")
+
+    monkeypatch.setattr(app.state.cache, "ping", down)
+    resp = await client.get("/readyz")
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["cache:memory"] == "unavailable"
+
+
+async def test_cache_outage_degrades_to_database(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com/o"})).json()["code"]
+
+    async def broken(*args: object) -> None:
+        raise ConnectionError("redis down")
+
+    for name in ("get", "set", "delete"):
+        monkeypatch.setattr(app.state.cache, name, broken)
+    assert (await client.get(f"/{code}")).status_code == 302
+    assert (await client.patch(f"/api/v1/links/{code}", json={"disabled": True})).status_code == 200
+    assert (await client.get(f"/{code}")).status_code == 410
+
+
+async def test_redis_backed_cache_and_limits(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = fakeredis.FakeAsyncRedis()
+    monkeypatch.setattr(app_module, "redis_client", lambda url: fake)
+    async with started(
+        settings, redis_url="redis://cache:6379/0", rate_limit_redirect_capacity=3
+    ) as (app, c):
+        assert app.state.cache.backend == "redis"
+        code = (await c.post("/api/v1/links", json={"url": "https://e.com/redis"})).json()["code"]
+        assert [(await c.get(f"/{code}")).status_code for _ in range(4)] == [302, 302, 302, 429]
+        assert await fake.get(f"shortener:link:{code}") is not None
+        assert (await c.get("/readyz")).json()["checks"]["cache:redis"] == "ok"
+
+
+async def test_features_can_be_disabled(settings: Settings) -> None:
+    async with started(
+        settings, cache_enabled=False, rate_limit_enabled=False, metrics_enabled=False
+    ) as (app, c):
+        code = (await c.post("/api/v1/links", json={"url": "https://e.com/off"})).json()["code"]
+        assert (await c.get(f"/{code}")).status_code == 302
+        assert app.state.cache is None
+        assert (await c.get("/metrics")).status_code in (404, 410)

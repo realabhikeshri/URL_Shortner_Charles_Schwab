@@ -1,0 +1,6 @@
+summary: Stats API tests (distinct visitors, referrers, UA families, window validation) and failure isolation
+rationale: Uses per-request client addresses through the ASGI transport to simulate distinct visitors
+  and proves that both enqueue failures and database failures leave redirects unaffected.
+alternatives:
+- 'Unit-test the SQL only: rejected, the contract is the HTTP response'
+ops: []

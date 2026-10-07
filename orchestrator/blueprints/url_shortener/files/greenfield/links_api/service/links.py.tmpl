@@ -1,0 +1,144 @@
+# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+"""Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+
+import hashlib
+import json
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from service.config import Settings
+from service.db import utcnow
+from service.domain.codes import AliasError, generate_code, normalize_alias
+from service.domain.urls import UrlError, normalize_url
+from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
+from service.models import Link
+from service.observability import get_logger
+from service.repository import LinkRepository
+from service.schemas import LinkCreate, LinkOut, LinkUpdate
+
+log = get_logger("links")
+
+
+def fingerprint(payload: LinkCreate) -> str:
+    canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+class LinkService:
+    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+        self.session = session
+        self.settings = settings
+        self.repo = LinkRepository(session)
+
+    def to_out(self, link: Link) -> LinkOut:
+        return LinkOut(
+            code=link.code,
+            short_url=f"{self.settings.base_url}/{link.code}",
+            target_url=link.target_url,
+            is_custom=link.is_custom,
+            tags=list(link.tags or []),
+            disabled=link.disabled,
+            created_at=link.created_at,
+            updated_at=link.updated_at,
+        )
+
+    async def create(
+        self, payload: LinkCreate, idempotency_key: str | None = None
+    ) -> tuple[Link, bool]:
+        """Return ``(link, created)``; ``created`` is False for an idempotent replay."""
+        try:
+            target = normalize_url(
+                payload.url,
+                max_length=self.settings.max_url_length,
+                allow_private=self.settings.allow_private_hosts,
+            )
+        except UrlError as exc:
+            raise InvalidInputError(str(exc)) from exc
+        digest = fingerprint(payload)
+        if idempotency_key:
+            replay = await self._replay(idempotency_key, digest)
+            if replay is not None:
+                return replay, False
+
+        if payload.custom_alias is not None:
+            try:
+                alias = normalize_alias(payload.custom_alias)
+            except AliasError as exc:
+                raise InvalidInputError(str(exc)) from exc
+            if await self.repo.alias_taken(alias):
+                raise ConflictError(f"alias '{payload.custom_alias}' is already taken")
+            candidates = [alias]
+        else:
+            candidates = [
+                generate_code(self.settings.code_length)
+                for _ in range(self.settings.code_max_attempts)
+            ]
+
+        for code in candidates:
+            if payload.custom_alias is None and await self.repo.code_exists(code):
+                log.info("code collision, retrying", extra={"code_length": len(code)})
+                continue
+            link = Link(
+                code=code,
+                target_url=target,
+                is_custom=payload.custom_alias is not None,
+                tags=list(payload.tags),
+                idempotency_key=idempotency_key,
+                request_fingerprint=digest if idempotency_key else None,
+            )
+            try:
+                await self.repo.add(link)
+                await self.session.commit()
+            except IntegrityError:
+                await self.session.rollback()
+                if idempotency_key:
+                    replay = await self._replay(idempotency_key, digest)
+                    if replay is not None:
+                        return replay, False
+                if payload.custom_alias is not None:
+                    raise ConflictError(
+                        f"alias '{payload.custom_alias}' is already taken"
+                    ) from None
+                continue
+            log.info("link created", extra={"code": link.code, "custom": link.is_custom})
+            return link, True
+        raise ConflictError("could not allocate a unique code; please retry")
+
+    async def _replay(self, key: str, digest: str) -> Link | None:
+        existing = await self.repo.get_by_idempotency_key(key)
+        if existing is None:
+            return None
+        if existing.request_fingerprint != digest:
+            raise ConflictError("Idempotency-Key was already used with a different request body")
+        return existing
+
+    async def resolve(self, code: str) -> Link:
+        """Look up a link for redirecting; raises 404 for unknown and 410 for gone links."""
+        link = await self.repo.get_by_code(code)
+        if link is None:
+            raise NotFoundError(f"no link with code '{code}'")
+        if link.deleted_at is not None or link.disabled:
+            raise GoneError(f"link '{code}' is no longer available")
+        return link
+
+    async def get(self, code: str) -> Link:
+        link = await self.repo.get_by_code(code)
+        if link is None or link.deleted_at is not None:
+            raise NotFoundError(f"no link with code '{code}'")
+        return link
+
+    async def update(self, code: str, patch: LinkUpdate) -> Link:
+        link = await self.get(code)
+        if patch.disabled is not None:
+            link.disabled = patch.disabled
+        link.updated_at = utcnow()
+        await self.session.commit()
+        return link
+
+    async def delete(self, code: str) -> None:
+        link = await self.get(code)
+        link.deleted_at = utcnow()
+        link.updated_at = link.deleted_at
+        await self.session.commit()
+        log.info("link deleted", extra={"code": code})

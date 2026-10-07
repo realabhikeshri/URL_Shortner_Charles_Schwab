@@ -1,0 +1,7 @@
+__pycache__/
+.coverage
+.mypy_cache/
+.hypothesis/
+.pytest_cache/
+*.db
+.orchestrator-scenario.json

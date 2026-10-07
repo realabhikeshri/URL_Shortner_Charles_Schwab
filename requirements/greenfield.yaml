@@ -1,0 +1,67 @@
+id: REQ-GF-001
+title: URL shortener core service
+kind: greenfield
+goal: >-
+  Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests.
+functional:
+  - Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.
+  - Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.
+  - Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.
+  - Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.
+  - Persist links in a relational database managed by reversible migrations.
+non_functional:
+  - Codes are 7 random base62 characters with collision retry; capacity and collision math documented.
+  - Only http/https targets; reject javascript:/data:/file:, embedded credentials, private and loopback hosts; max length 2048.
+  - Structured JSON logs with request ids; consistent error envelope {"error":{code,message,request_id}}.
+  - Security headers and request body size limits.
+  - Service test coverage at least 85%.
+acceptance_criteria:
+  - id: AC-1
+    given: a valid https URL
+    when: a client POSTs it to /api/v1/links
+    then: the API returns 201 with code, short_url and created_at
+    verified_by: [tests/service/test_api_links.py::test_create_returns_201_with_short_url]
+  - id: AC-2
+    given: an existing short code
+    when: a client requests GET /{code}
+    then: the service redirects with 302 to the stored target and Cache-Control no-store
+    verified_by: [tests/service/test_api_links.py::test_redirect_follows_with_302_and_no_store]
+  - id: AC-3
+    given: an unknown code
+    when: a client requests GET /{code}
+    then: the service returns 404 using the error envelope
+    verified_by: [tests/service/test_api_links.py::test_unknown_code_is_404]
+  - id: AC-4
+    given: a javascript:, private-network or malformed URL
+    when: a client tries to shorten it
+    then: the API rejects it with 422
+    verified_by:
+      - tests/service/test_api_links.py::test_invalid_urls_are_rejected_with_422
+      - tests/service/test_properties.py::test_dangerous_schemes_always_rejected
+  - id: AC-5
+    given: the same Idempotency-Key and body sent twice
+    when: both requests complete
+    then: exactly one link exists and the second response is a replay
+    verified_by:
+      - tests/service/test_api_links.py::test_idempotency_key_replays_and_detects_misuse
+      - tests/service/test_integration.py::test_concurrent_idempotent_requests_create_one_link
+  - id: AC-6
+    given: a disabled or deleted link
+    when: a client follows it
+    then: the service returns 410 Gone
+    verified_by: [tests/service/test_api_links.py::test_metadata_patch_and_soft_delete]
+  - id: AC-7
+    given: the service is running
+    when: probes call /healthz and /readyz
+    then: they report liveness and database readiness
+    verified_by:
+      - tests/service/test_health.py::test_liveness
+      - tests/service/test_health.py::test_readiness_ok_and_failing_database
+  - id: AC-8
+    given: the migration history
+    when: it is upgraded, downgraded and upgraded again
+    then: every step succeeds
+    verified_by: [tests/service/test_integration.py::test_migrations_upgrade_and_downgrade_cleanly]
+constraints:
+  - Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy 2.0 async, Alembic; SQLite by default, Postgres supported.
+  - No secrets in code; configuration via environment variables.

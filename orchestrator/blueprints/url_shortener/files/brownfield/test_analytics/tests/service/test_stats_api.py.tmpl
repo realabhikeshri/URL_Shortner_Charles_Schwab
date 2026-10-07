@@ -1,0 +1,108 @@
+# lineage: REQ-BF-002 / test.analytics (see runs/ for the decision trail)
+"""Stats endpoint end-to-end, and proof that analytics failures never break a redirect."""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+CHROME = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
+
+
+@asynccontextmanager
+async def visitor(app: FastAPI, ip: str) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=app, client=(ip, 50000))
+    async with AsyncClient(transport=transport, base_url="http://testserver") as c:
+        yield c
+
+
+async def test_stats_reflect_recorded_clicks(app: FastAPI, client: AsyncClient) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://example.com/s"})).json()[
+        "code"
+    ]
+    plan = [
+        ("198.51.100.1", CHROME, "https://news.example.com/a"),
+        ("198.51.100.1", CHROME, "https://news.example.com/b"),  # same visitor again
+        ("198.51.100.2", CHROME, "https://news.example.com/c"),
+        ("198.51.100.3", FIREFOX, "https://blog.example.org/"),
+        ("198.51.100.4", "curl/8.7.1", None),
+    ]
+    for ip, agent, ref in plan:
+        headers = {"User-Agent": agent} | ({"Referer": ref} if ref else {})
+        async with visitor(app, ip) as c:
+            assert (await c.get(f"/{code}", headers=headers)).status_code == 302
+    await app.state.recorder.flush()
+
+    resp = await client.get(f"/api/v1/links/{code}/stats")
+    assert resp.status_code == 200
+    stats = resp.json()
+    assert stats["code"] == code
+    assert stats["total_clicks"] == 5
+    assert stats["unique_visitors"] == 4
+    assert len(stats["clicks_by_day"]) == 1
+    assert stats["clicks_by_day"][0] == {
+        "day": stats["clicks_by_day"][0]["day"],
+        "clicks": 5,
+        "unique_visitors": 4,
+    }
+    assert stats["top_referrers"] == [
+        {"host": "news.example.com", "clicks": 3},
+        {"host": "blog.example.org", "clicks": 1},
+    ]
+    assert stats["top_user_agents"][0] == {"family": "Chrome", "clicks": 3}
+    assert {a["family"] for a in stats["top_user_agents"]} == {"Chrome", "Firefox", "curl"}
+
+
+async def test_stats_for_unknown_or_deleted_link_is_404(client: AsyncClient) -> None:
+    assert (await client.get("/api/v1/links/nope404/stats")).status_code == 404
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+    await client.delete(f"/api/v1/links/{code}")
+    assert (await client.get(f"/api/v1/links/{code}/stats")).status_code == 404
+
+
+async def test_stats_window_is_validated(client: AsyncClient) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+    assert (await client.get(f"/api/v1/links/{code}/stats?days=0")).status_code == 422
+    assert (await client.get(f"/api/v1/links/{code}/stats?days=366")).status_code == 422
+    empty = await client.get(f"/api/v1/links/{code}/stats?days=7")
+    assert empty.json()["total_clicks"] == 0
+
+
+async def test_analytics_failure_never_breaks_redirect(
+    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code = (await client.post("/api/v1/links", json={"url": "https://e.com/f"})).json()["code"]
+
+    def explode(event: object) -> bool:
+        raise RuntimeError("queue exploded")
+
+    monkeypatch.setattr(app.state.recorder, "record", explode)
+    assert (await client.get(f"/{code}")).status_code == 302
+
+    monkeypatch.undo()
+
+    async def db_down(batch: object) -> None:
+        raise ConnectionError("analytics DB unavailable")
+
+    monkeypatch.setattr(app.state.recorder, "_persist", db_down)
+    assert (await client.get(f"/{code}")).status_code == 302
+    await app.state.recorder.flush()
+    assert app.state.recorder.failed >= 1
+
+
+async def test_redirect_works_with_analytics_disabled(settings: object) -> None:
+    from service.app import create_app
+    from service.config import Settings
+
+    assert isinstance(settings, Settings)
+    app = create_app(settings.model_copy(update={"analytics_enabled": False}))
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+    ):
+        code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+        assert (await c.get(f"/{code}")).status_code == 302
+        assert app.state.recorder is None

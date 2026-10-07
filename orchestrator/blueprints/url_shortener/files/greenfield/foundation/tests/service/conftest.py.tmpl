@@ -1,0 +1,46 @@
+# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+import shutil
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from service.app import create_app
+from service.config import Settings
+from service.db import run_migrations
+
+
+@pytest.fixture(scope="session")
+def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Run the real Alembic migrations once; each test gets a copy of the result."""
+    path = tmp_path_factory.mktemp("db") / "template.db"
+    run_migrations(f"sqlite+aiosqlite:///{path}")
+    return path
+
+
+@pytest.fixture
+def settings(tmp_path: Path, migrated_template: Path) -> Settings:
+    db = tmp_path / "test.db"
+    shutil.copyfile(migrated_template, db)
+    return Settings(
+        database_url=f"sqlite+aiosqlite:///{db}",
+        db_auto_migrate=False,
+        base_url="http://sho.rt/",
+        environment="test",
+        log_json=True,
+    )
+
+
+@pytest.fixture
+async def app(settings: Settings) -> AsyncIterator[FastAPI]:
+    application = create_app(settings)
+    async with application.router.lifespan_context(application):
+        yield application
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
+        yield c

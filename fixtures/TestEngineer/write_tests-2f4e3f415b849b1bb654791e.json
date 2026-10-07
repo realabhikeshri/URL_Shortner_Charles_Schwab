@@ -1,0 +1,28 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "alternatives": [
+        "Mocks for the database: rejected, would not catch constraint/race behaviour"
+      ],
+      "ops": [
+        {
+          "content": "# lineage: REQ-GF-001 / test.integration (see runs/ for the decision trail)\n\"\"\"End-to-end behaviour through the HTTP API against a migrated SQLite database.\"\"\"\n\nimport asyncio\nfrom pathlib import Path\n\nimport pytest\nfrom alembic import command\nfrom alembic.config import Config\nfrom fastapi import FastAPI\nfrom httpx import AsyncClient\nfrom sqlalchemy import create_engine, inspect\n\nfrom service import links as links_module\nfrom service.db import ALEMBIC_INI\nfrom service.models import Link\n\n\nasync def test_full_link_lifecycle(client: AsyncClient) -> None:\n    created = await client.post(\n        \"/api/v1/links\", json={\"url\": \"https://example.com/launch\", \"custom_alias\": \"launch\"}\n    )\n    assert created.status_code == 201\n    code = created.json()[\"code\"]\n    assert (await client.get(f\"/{code}\")).headers[\"location\"] == \"https://example.com/launch\"\n    assert (await client.patch(f\"/api/v1/links/{code}\", json={\"disabled\": True})).status_code == 200\n    assert (await client.get(f\"/{code}\")).status_code == 410\n    assert (await client.delete(f\"/api/v1/links/{code}\")).status_code == 204\n    assert (await client.get(f\"/api/v1/links/{code}\")).status_code == 404\n\n\nasync def test_generated_codes_are_case_sensitive(app: FastAPI, client: AsyncClient) -> None:\n    \"\"\"Generated base62 codes are case-sensitive: 'AbC1234' and 'abc1234' are different links.\"\"\"\n    async with app.state.db.session() as session:\n        session.add(Link(code=\"AbC1234\", target_url=\"https://example.com/upper\", tags=[]))\n        await session.commit()\n    resp = await client.get(\"/AbC1234\")\n    assert resp.status_code == 302\n    assert resp.headers[\"location\"] == \"https://example.com/upper\"\n    assert (await client.get(\"/abc1234\")).status_code == 404\n\n\nasync def test_code_collision_retries_then_succeeds(\n    client: AsyncClient, monkeypatch: pytest.MonkeyPatch\n) -> None:\n    first = await client.post(\"/api/v1/links\", json={\"url\": \"https://e.com/1\"})\n    taken = first.json()[\"code\"]\n    sequence = iter([taken, taken, \"Fresh01\", \"Fresh02\", \"Fresh03\"])\n    monkeypatch.setattr(links_module, \"generate_code\", lambda length: next(sequence))\n    second = await client.post(\"/api/v1/links\", json={\"url\": \"https://e.com/2\"})\n    assert second.status_code == 201\n    assert second.json()[\"code\"] == \"Fresh01\"\n\n\nasync def test_code_space_exhaustion_returns_409(\n    client: AsyncClient, monkeypatch: pytest.MonkeyPatch\n) -> None:\n    taken = (await client.post(\"/api/v1/links\", json={\"url\": \"https://e.com/1\"})).json()[\"code\"]\n    monkeypatch.setattr(links_module, \"generate_code\", lambda length: taken)\n    resp = await client.post(\"/api/v1/links\", json={\"url\": \"https://e.com/2\"})\n    assert resp.status_code == 409\n    assert \"unique code\" in resp.json()[\"error\"][\"message\"]\n\n\nasync def test_concurrent_creates_get_distinct_codes(client: AsyncClient) -> None:\n    responses = await asyncio.gather(\n        *(client.post(\"/api/v1/links\", json={\"url\": f\"https://e.com/{i}\"}) for i in range(20))\n    )\n    assert all(r.status_code == 201 for r in responses)\n    assert len({r.json()[\"code\"] for r in responses}) == 20\n\n\nasync def test_concurrent_idempotent_requests_create_one_link(client: AsyncClient) -> None:\n    headers = {\"Idempotency-Key\": \"same-key\"}\n    responses = await asyncio.gather(\n        *(\n            client.post(\"/api/v1/links\", json={\"url\": \"https://e.com/i\"}, headers=headers)\n            for _ in range(5)\n        )\n    )\n    assert {r.status_code for r in responses} == {201}\n    assert len({r.json()[\"code\"] for r in responses}) == 1\n\n\nasync def test_alias_conflict_is_case_insensitive(client: AsyncClient) -> None:\n    assert (\n        await client.post(\"/api/v1/links\", json={\"url\": \"https://e.com\", \"custom_alias\": \"promo\"})\n    ).status_code == 201\n    clash = await client.post(\n        \"/api/v1/links\", json={\"url\": \"https://e.com\", \"custom_alias\": \"PROMO\"}\n    )\n    assert clash.status_code == 409\n\n\ndef test_migrations_upgrade_and_downgrade_cleanly(tmp_path: Path) -> None:\n    db = tmp_path / \"m.db\"\n    cfg = Config(str(ALEMBIC_INI))\n    cfg.set_main_option(\"sqlalchemy.url\", f\"sqlite+aiosqlite:///{db}\")\n    command.upgrade(cfg, \"head\")\n    sync = create_engine(f\"sqlite:///{db}\")\n    assert \"links\" in inspect(sync).get_table_names()\n    command.downgrade(cfg, \"base\")\n    assert \"links\" not in inspect(sync).get_table_names()\n    command.upgrade(cfg, \"head\")\n    assert \"links\" in inspect(sync).get_table_names()\n    sync.dispose()\n",
+          "new": null,
+          "old": null,
+          "op": "write",
+          "path": "tests/service/test_integration.py"
+        }
+      ],
+      "rationale": "Exercises the API end-to-end against a real migrated SQLite database, including the concurrency and retry paths that unit tests cannot reach, and proves migrations upgrade/downgrade cleanly.",
+      "summary": "Integration tests - lifecycle, case-sensitive generated codes, collision retry, concurrency, idempotency races, migrations"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 248,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 1406
+  },
+  "role": "TestEngineer",
+  "schema": "ChangeSet",
+  "task": "write_tests"
+}

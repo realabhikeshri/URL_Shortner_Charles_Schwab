@@ -1,0 +1,48 @@
+summary: Alias lookup falls back to the canonical lower-case alias (custom links only)
+rationale: Exact match first keeps generated base62 codes case-sensitive; only when that misses and the
+  requested code is not already lower case do we look up the canonical alias, restricted to is_custom
+  rows. Aliases are already stored lower-cased, so no data migration is needed.
+alternatives:
+- 'Lower-case every lookup: rejected, breaks generated codes (62 -> 36 symbol space and wrong links)'
+- 'Add a code_lower column: rejected, unnecessary schema change'
+first_attempt: brownfield/alias_fix_naive
+repair_signatures:
+- test_generated_codes_are_case_sensitive
+ops:
+- op: replace
+  path: service/repository.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+    """Data access for links."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.alias_fix
+    """Data access for links."""
+
+- op: replace
+  path: service/repository.py
+  old: |2
+
+        async def get_by_code(self, code: str) -> Link | None:
+            result = await self.session.execute(select(Link).where(Link.code == code))
+            return result.scalar_one_or_none()
+
+        async def code_exists(self, code: str) -> bool:
+  new: |2
+
+        async def get_by_code(self, code: str) -> Link | None:
+            """Exact match first (generated codes are case-sensitive), then the canonical alias.
+
+            Aliases are stored lower-cased, so a lower-cased lookup restricted to custom links makes
+            aliases case-insensitive without ever folding generated base62 codes (REQ-BF-002).
+            """
+            result = await self.session.execute(select(Link).where(Link.code == code))
+            link = result.scalar_one_or_none()
+            if link is None and code != code.lower():
+                alias = await self.session.execute(
+                    select(Link).where(Link.code == code.lower(), Link.is_custom.is_(True))
+                )
+                link = alias.scalar_one_or_none()
+            return link
+
+        async def code_exists(self, code: str) -> bool:

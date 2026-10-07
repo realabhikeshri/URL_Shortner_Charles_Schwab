@@ -1,0 +1,7 @@
+summary: Regression test reproducing the alias case bug (red before the fix)
+rationale: Test-first bug fix. Creates an alias as 'MyLink' and asserts it resolves at /MyLink, /mylink
+  and /MYLINK and via the metadata endpoint. The tests_fail_first gate proves it reproduces the bug (fails
+  with an assertion, not an error) before any production code changes.
+alternatives:
+- 'Fix first and test after: rejected, would not prove the test detects the bug'
+ops: []

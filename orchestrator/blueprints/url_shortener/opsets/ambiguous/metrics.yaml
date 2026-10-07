@@ -1,0 +1,6 @@
+summary: Prometheus metrics (per-app registry) and ASGI middleware labelled by route template
+rationale: Labels use the route template (/{code}), never the raw path, so cardinality stays bounded.
+  A per-app CollectorRegistry avoids global state and duplicate-registration errors in tests.
+alternatives:
+- 'OpenTelemetry metrics SDK: deferred, Prometheus text is what the platform scrapes'
+ops: []

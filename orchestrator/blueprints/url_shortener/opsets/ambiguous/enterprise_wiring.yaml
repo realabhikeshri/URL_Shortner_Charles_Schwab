@@ -1,0 +1,756 @@
+summary: Wire read-through cache, rate limits and metrics into config, app, routes and LinkService
+rationale: Redirects resolve through a read-through cache keyed by canonical code (aliases look up their
+  lower-case entry; only canonical misses are negatively cached), invalidated on create/update/delete.
+  Cache errors degrade to the database. Writes and redirects are rate limited per client; readiness now
+  covers the cache; /metrics exposes request, redirect, cache, rate-limit and analytics gauges. Adds redis
+  and prometheus-client as runtime dependencies (approval required).
+alternatives:
+- 'Cache the full Link row: rejected, larger payloads and more invalidation surface'
+- 'Write-through cache: rejected, invalidation is simpler and links change rarely'
+ops:
+- op: replace
+  path: pyproject.toml
+  old: |2+
+        "asyncpg>=0.29",
+        "alembic>=1.13",
+    ]
+
+  new: |2+
+        "asyncpg>=0.29",
+        "alembic>=1.13",
+        "redis>=5.0",
+        "prometheus-client>=0.20",
+    ]
+
+- op: replace
+  path: service/api/deps.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    """FastAPI dependencies shared by the routers."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
+    """FastAPI dependencies shared by the routers."""
+
+- op: replace
+  path: service/api/deps.py
+  old: |+
+    from service.db import Database
+    from service.links import LinkService
+
+
+  new: |+
+    from service.db import Database
+    from service.links import LinkService
+    from service.ratelimit import RateLimitedError, RateLimiter, enforce
+
+
+- op: replace
+  path: service/api/deps.py
+  old: |2
+
+    async def get_link_service(
+        session: Annotated[AsyncSession, Depends(get_session)],
+        settings: Annotated[Settings, Depends(get_settings)],
+    ) -> LinkService:
+        return LinkService(session, settings)
+  new: |2
+
+    async def get_link_service(
+        request: Request,
+        session: Annotated[AsyncSession, Depends(get_session)],
+        settings: Annotated[Settings, Depends(get_settings)],
+    ) -> LinkService:
+        state = request.app.state
+        return LinkService(
+            session,
+            settings,
+            cache=getattr(state, "cache", None),
+            metrics=getattr(state, "metrics", None),
+        )
+
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+
+    async def _limit(request: Request, limiter: RateLimiter | None, key: str, scope: str) -> None:
+        if limiter is None:
+            return
+        try:
+            await enforce(limiter, key)
+        except RateLimitedError:
+            metrics = getattr(request.app.state, "metrics", None)
+            if metrics is not None:
+                metrics.rate_limited.labels(scope).inc()
+            raise
+
+
+    async def limit_writes(request: Request) -> None:
+        await _limit(
+            request,
+            getattr(request.app.state, "write_limiter", None),
+            f"w:{client_ip(request)}",
+            "write",
+        )
+
+
+    async def limit_redirects(request: Request) -> None:
+        await _limit(
+            request,
+            getattr(request.app.state, "redirect_limiter", None),
+            f"r:{client_ip(request)}",
+            "redirect",
+        )
+- op: replace
+  path: service/api/health.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    """Liveness and readiness probes."""
+
+    from typing import Annotated
+
+    from fastapi import APIRouter, Depends
+    from fastapi.responses import JSONResponse
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Liveness and readiness probes."""
+
+    from typing import Annotated
+
+    from fastapi import APIRouter, Depends, Request
+    from fastapi.responses import JSONResponse
+
+- op: replace
+  path: service/api/health.py
+  old: |2
+
+
+    @router.get("/readyz", summary="Readiness probe (database reachable)")
+    async def readyz(db: Annotated[Database, Depends(get_database)]) -> JSONResponse:
+        checks: dict[str, str] = {}
+        try:
+  new: |2
+
+
+    @router.get("/readyz", summary="Readiness probe (database and cache reachable)")
+    async def readyz(request: Request, db: Annotated[Database, Depends(get_database)]) -> JSONResponse:
+        checks: dict[str, str] = {}
+        try:
+- op: replace
+  path: service/api/health.py
+  old: |2
+            )
+            checks["database"] = "unavailable"
+        ready = all(v == "ok" for v in checks.values())
+        return JSONResponse(
+  new: |2
+            )
+            checks["database"] = "unavailable"
+        cache = getattr(request.app.state, "cache", None)
+        if cache is not None:
+            try:
+                checks[f"cache:{cache.backend}"] = "ok" if await cache.ping() else "unavailable"
+            except Exception as exc:
+                log.warning(
+                    "readiness check failed", extra={"check": "cache", "error": type(exc).__name__}
+                )
+                checks[f"cache:{cache.backend}"] = "unavailable"
+        ready = all(v == "ok" for v in checks.values())
+        return JSONResponse(
+- op: replace
+  path: service/api/links.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+    """Link management API (/api/v1/links)."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Link management API (/api/v1/links)."""
+
+- op: replace
+  path: service/api/links.py
+  old: |
+    from fastapi import APIRouter, Depends, Header, Response, status
+
+    from service.api.deps import get_link_service
+    from service.links import LinkService
+    from service.schemas import LinkCreate, LinkOut, LinkUpdate
+  new: |
+    from fastapi import APIRouter, Depends, Header, Response, status
+
+    from service.api.deps import get_link_service, limit_writes
+    from service.links import LinkService
+    from service.schemas import LinkCreate, LinkOut, LinkUpdate
+- op: replace
+  path: service/api/links.py
+  old: |2
+
+
+    @router.post("", status_code=status.HTTP_201_CREATED, response_model=LinkOut)
+    async def create_link(
+        payload: LinkCreate,
+  new: |2
+
+
+    @router.post(
+        "",
+        status_code=status.HTTP_201_CREATED,
+        response_model=LinkOut,
+        dependencies=[Depends(limit_writes)],
+    )
+    async def create_link(
+        payload: LinkCreate,
+- op: replace
+  path: service/api/links.py
+  old: |2
+
+
+    @router.patch("/{code}", response_model=LinkOut)
+    async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
+        return service.to_out(await service.update(code, patch))
+
+
+    @router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_link(code: str, service: Service) -> Response:
+        await service.delete(code)
+  new: |2
+
+
+    @router.patch("/{code}", response_model=LinkOut, dependencies=[Depends(limit_writes)])
+    async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
+        return service.to_out(await service.update(code, patch))
+
+
+    @router.delete(
+        "/{code}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(limit_writes)]
+    )
+    async def delete_link(code: str, service: Service) -> Response:
+        await service.delete(code)
+- op: replace
+  path: service/api/redirect.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.analytics
+    """Public redirect endpoint (registered last so fixed routes win)."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.analytics,
+    #          REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Public redirect endpoint (registered last so fixed routes win)."""
+
+- op: replace
+  path: service/api/redirect.py
+  old: |2
+
+    from service.analytics import ClickEvent
+    from service.api.deps import get_link_service
+    from service.db import utcnow
+    from service.links import LinkService
+  new: |2
+
+    from service.analytics import ClickEvent
+    from service.api.deps import get_link_service, limit_redirects
+    from service.db import utcnow
+    from service.links import LinkService
+- op: replace
+  path: service/api/redirect.py
+  old: |2
+        status_code=302,
+        response_class=RedirectResponse,
+        responses={404: {"description": "Unknown code"}, 410: {"description": "Expired or disabled"}},
+    )
+    async def follow(
+  new: |2
+        status_code=302,
+        response_class=RedirectResponse,
+        responses={
+            404: {"description": "Unknown code"},
+            410: {"description": "Expired or disabled"},
+            429: {"description": "Rate limited"},
+        },
+        dependencies=[Depends(limit_redirects)],
+    )
+    async def follow(
+- op: replace
+  path: service/api/redirect.py
+  old: |2
+        link = await service.resolve(code)
+        record_click(request, link.id)
+        return RedirectResponse(
+            link.target_url,
+  new: |2
+        link = await service.resolve(code)
+        record_click(request, link.id)
+        if service.metrics is not None:
+            service.metrics.redirects.labels("ok").inc()
+        return RedirectResponse(
+            link.target_url,
+- op: replace
+  path: service/app.py
+  old: |
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
+    """Application factory."""
+
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+  new: |
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics,
+    #          REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Application factory."""
+
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+    from typing import Any
+
+    from fastapi import FastAPI
+- op: replace
+  path: service/app.py
+  old: |2+
+        SecurityHeadersMiddleware,
+    )
+    from service.config import Settings, get_settings
+    from service.db import Database, migrate
+    from service.errors import install_error_handlers
+    from service.observability import configure_logging, get_logger
+
+    log = get_logger("app")
+
+
+  new: |2+
+        SecurityHeadersMiddleware,
+    )
+    from service.cache import Cache, build_cache, redis_client
+    from service.config import Settings, get_settings
+    from service.db import Database, migrate
+    from service.errors import install_error_handlers
+    from service.metrics import Metrics, MetricsMiddleware
+    from service.metrics import router as metrics_router
+    from service.observability import configure_logging, get_logger
+    from service.ratelimit import MemoryRateLimiter, RateLimiter, RedisRateLimiter
+
+    log = get_logger("app")
+
+
+    def build_limiters(
+        settings: Settings, redis: Any | None
+    ) -> tuple[RateLimiter | None, RateLimiter | None]:
+        if not settings.rate_limit_enabled:
+            return None, None
+
+        def make(capacity: int, refill_per_s: float) -> RateLimiter:
+            if redis is not None:
+                return RedisRateLimiter(redis, capacity, refill_per_s)
+            return MemoryRateLimiter(capacity, refill_per_s)
+
+        return (
+            make(settings.rate_limit_write_capacity, settings.rate_limit_write_refill_per_s),
+            make(settings.rate_limit_redirect_capacity, settings.rate_limit_redirect_refill_per_s),
+        )
+
+
+- op: replace
+  path: service/app.py
+  old: |2
+                await migrate(settings.database_url)
+            app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
+            app.state.recorder = None
+            if settings.analytics_enabled:
+  new: |2
+                await migrate(settings.database_url)
+            app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
+            redis = redis_client(settings.redis_url) if settings.redis_url else None
+            cache: Cache | None = None
+            if settings.cache_enabled:
+                cache = build_cache(None, max_entries=settings.cache_max_entries, client=redis)
+            app.state.cache = cache
+            app.state.write_limiter, app.state.redirect_limiter = build_limiters(settings, redis)
+            app.state.recorder = None
+            if settings.analytics_enabled:
+- op: replace
+  path: service/app.py
+  old: |2
+                )
+                await app.state.recorder.start()
+            log.info("startup complete", extra={"environment": settings.environment})
+            try:
+                yield
+  new: |2
+                )
+                await app.state.recorder.start()
+                recorder = app.state.recorder
+                metrics.bind_gauge(metrics.analytics_dropped, lambda: float(recorder.dropped))
+                metrics.bind_gauge(metrics.analytics_queue, lambda: float(recorder.queue.qsize()))
+            log.info(
+                "startup complete",
+                extra={"environment": settings.environment, "cache": cache.backend if cache else None},
+            )
+            try:
+                yield
+- op: replace
+  path: service/app.py
+  old: |2+
+                if app.state.recorder is not None:
+                    await app.state.recorder.stop()
+                await app.state.db.dispose()
+
+  new: |2+
+                if app.state.recorder is not None:
+                    await app.state.recorder.stop()
+                if cache is not None:
+                    await cache.close()
+                elif redis is not None:
+                    await redis.aclose()
+                await app.state.db.dispose()
+
+- op: replace
+  path: service/app.py
+  old: |2
+        )
+        app.state.settings = settings
+        install_error_handlers(app)
+        if settings.cors_origins:
+  new: |2
+        )
+        app.state.settings = settings
+        metrics = Metrics()
+        app.state.metrics = metrics
+        install_error_handlers(app)
+        if settings.cors_origins:
+- op: replace
+  path: service/app.py
+  old: |2
+        app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+        app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
+        app.add_middleware(RequestContextMiddleware)
+
+        app.include_router(health.router)
+        app.include_router(links.router)
+        app.include_router(stats.router)
+  new: |2
+        app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+        app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
+        if settings.metrics_enabled:
+            app.add_middleware(MetricsMiddleware, metrics=metrics)
+        app.add_middleware(RequestContextMiddleware)
+
+        app.include_router(health.router)
+        if settings.metrics_enabled:
+            app.include_router(metrics_router)
+        app.include_router(links.router)
+        app.include_router(stats.router)
+- op: replace
+  path: service/config.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
+    """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics,
+    #          REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+
+- op: replace
+  path: service/config.py
+  old: |2
+        analytics_purge_interval_s: float = Field(3600.0, gt=0)
+
+        @field_validator("base_url")
+        @classmethod
+  new: |2
+        analytics_purge_interval_s: float = Field(3600.0, gt=0)
+
+        # Shared Redis for cache + rate limits (multi-replica); in-process fallbacks when unset.
+        redis_url: str | None = None
+        cache_enabled: bool = True
+        cache_ttl_s: float = Field(300.0, gt=0)
+        cache_negative_ttl_s: float = Field(5.0, gt=0)
+        cache_max_entries: int = Field(10_000, ge=1)
+        rate_limit_enabled: bool = True
+        rate_limit_write_capacity: int = Field(60, ge=1)
+        rate_limit_write_refill_per_s: float = Field(1.0, gt=0)
+        rate_limit_redirect_capacity: int = Field(300, ge=1)
+        rate_limit_redirect_refill_per_s: float = Field(50.0, gt=0)
+        metrics_enabled: bool = True
+
+        @field_validator("base_url")
+        @classmethod
+- op: replace
+  path: service/links.py
+  old: |
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
+    """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+
+    import hashlib
+    import json
+    from datetime import datetime
+
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from service.config import Settings
+    from service.db import utcnow
+  new: |
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry,
+    #          REQ-AMBIGUOUS / implement.enterprise_wiring
+    """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+
+    import hashlib
+    import json
+    from dataclasses import asdict, dataclass
+    from datetime import datetime
+    from typing import Any
+
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from service.cache import Cache
+    from service.config import Settings
+    from service.db import utcnow
+- op: replace
+  path: service/links.py
+  old: |
+    from service.domain.urls import UrlError, normalize_url
+    from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
+    from service.models import Link
+    from service.observability import get_logger
+  new: |
+    from service.domain.urls import UrlError, normalize_url
+    from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
+    from service.metrics import Metrics
+    from service.models import Link
+    from service.observability import get_logger
+- op: replace
+  path: service/links.py
+  old: |2
+
+
+    def fingerprint(payload: LinkCreate) -> str:
+        canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
+  new: |2
+
+
+    MISSING = "__missing__"
+
+
+    @dataclass(frozen=True)
+    class Resolved:
+        """What the redirect path needs, small enough to cache."""
+
+        id: int
+        code: str
+        target_url: str
+        is_custom: bool
+        expires_at: datetime | None
+        gone: bool
+
+        @classmethod
+        def from_link(cls, link: Link) -> "Resolved":
+            return cls(
+                id=link.id,
+                code=link.code,
+                target_url=link.target_url,
+                is_custom=link.is_custom,
+                expires_at=link.expires_at,
+                gone=link.deleted_at is not None or link.disabled,
+            )
+
+        def to_json(self) -> str:
+            data = asdict(self)
+            data["expires_at"] = self.expires_at.isoformat() if self.expires_at else None
+            return json.dumps(data)
+
+        @classmethod
+        def from_json(cls, raw: str) -> "Resolved":
+            data: dict[str, Any] = json.loads(raw)
+            expires = data.get("expires_at")
+            data["expires_at"] = datetime.fromisoformat(expires) if expires else None
+            return cls(**data)
+
+
+    def fingerprint(payload: LinkCreate) -> str:
+        canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
+- op: replace
+  path: service/links.py
+  old: |2
+
+    class LinkService:
+        def __init__(self, session: AsyncSession, settings: Settings) -> None:
+            self.session = session
+            self.settings = settings
+            self.repo = LinkRepository(session)
+
+        def to_out(self, link: Link) -> LinkOut:
+  new: |2
+
+    class LinkService:
+        def __init__(
+            self,
+            session: AsyncSession,
+            settings: Settings,
+            *,
+            cache: Cache | None = None,
+            metrics: Metrics | None = None,
+        ) -> None:
+            self.session = session
+            self.settings = settings
+            self.repo = LinkRepository(session)
+            self.cache = cache
+            self.metrics = metrics
+
+        def to_out(self, link: Link) -> LinkOut:
+- op: replace
+  path: service/links.py
+  old: |2
+                    continue
+                log.info("link created", extra={"code": link.code, "custom": link.is_custom})
+                return link, True
+            raise ConflictError("could not allocate a unique code; please retry")
+  new: |2
+                    continue
+                log.info("link created", extra={"code": link.code, "custom": link.is_custom})
+                await self._invalidate(link.code)  # clears a cached "missing" marker
+                return link, True
+            raise ConflictError("could not allocate a unique code; please retry")
+- op: replace
+  path: service/links.py
+  old: |2
+            return existing
+
+        async def resolve(self, code: str) -> Link:
+            """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
+            link = await self.repo.get_by_code(code)
+            if link is None:
+                raise NotFoundError(f"no link with code '{code}'")
+            if link.deleted_at is not None or link.disabled:
+                raise GoneError(f"link '{code}' is no longer available")
+            if is_expired(link):
+                raise GoneError(f"link '{code}' has expired")
+            return link
+
+        async def get(self, code: str) -> Link:
+  new: |2
+            return existing
+
+        # ------------------------------------------------------------------ redirect hot path
+
+        async def _cache_get(self, key: str) -> str | None:
+            if self.cache is None:
+                return None
+            try:
+                return await self.cache.get(key)
+            except Exception as exc:  # a cache outage degrades to the database, never to an error
+                log.warning("cache read failed", extra={"error": type(exc).__name__})
+                return None
+
+        async def _cache_set(self, key: str, value: str, ttl_s: float) -> None:
+            if self.cache is None:
+                return
+            try:
+                await self.cache.set(key, value, ttl_s)
+            except Exception as exc:
+                log.warning("cache write failed", extra={"error": type(exc).__name__})
+
+        async def _invalidate(self, code: str) -> None:
+            if self.cache is None:
+                return
+            try:
+                await self.cache.delete(f"link:{code}")
+            except Exception as exc:
+                log.warning("cache invalidation failed", extra={"error": type(exc).__name__})
+
+        def _count(self, result: str) -> None:
+            if self.metrics is not None and self.cache is not None:
+                self.metrics.cache.labels(result).inc()
+
+        async def _lookup(self, code: str) -> Resolved | None:
+            """Read-through cache keyed by canonical code; aliases resolve case-insensitively."""
+            raw = await self._cache_get(f"link:{code}")
+            if raw is None and code != code.lower():
+                alias_raw = await self._cache_get(f"link:{code.lower()}")
+                if (
+                    alias_raw is not None
+                    and alias_raw != MISSING
+                    and Resolved.from_json(alias_raw).is_custom
+                ):
+                    raw = alias_raw
+            if raw == MISSING:
+                self._count("hit")
+                return None
+            if raw is not None:
+                self._count("hit")
+                return Resolved.from_json(raw)
+            self._count("miss")
+            link = await self.repo.get_by_code(code)
+            if link is None:
+                if code == code.lower():  # only canonical misses are cached (see ADR-013)
+                    await self._cache_set(f"link:{code}", MISSING, self.settings.cache_negative_ttl_s)
+                return None
+            resolved = Resolved.from_link(link)
+            await self._cache_set(f"link:{link.code}", resolved.to_json(), self.settings.cache_ttl_s)
+            return resolved
+
+        async def resolve(self, code: str) -> Resolved:
+            """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
+            resolved = await self._lookup(code)
+            if resolved is None:
+                raise NotFoundError(f"no link with code '{code}'")
+            if resolved.gone:
+                raise GoneError(f"link '{code}' is no longer available")
+            if resolved.expires_at is not None and resolved.expires_at <= utcnow():
+                raise GoneError(f"link '{code}' has expired")
+            return resolved
+
+        async def get(self, code: str) -> Link:
+- op: replace
+  path: service/links.py
+  old: |2+
+            link.updated_at = utcnow()
+            await self.session.commit()
+            return link
+
+  new: |2+
+            link.updated_at = utcnow()
+            await self.session.commit()
+            await self._invalidate(link.code)
+            return link
+
+- op: replace
+  path: service/links.py
+  old: |2
+            link.updated_at = link.deleted_at
+            await self.session.commit()
+            log.info("link deleted", extra={"code": code})
+  new: |2
+            link.updated_at = link.deleted_at
+            await self.session.commit()
+            await self._invalidate(link.code)
+            log.info("link deleted", extra={"code": code})
+- op: replace
+  path: tests/service/test_health.py
+  old: |
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    import json
+    import logging
+  new: |
+    # lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
+    import json
+    import logging
+- op: replace
+  path: tests/service/test_health.py
+  old: |2+
+        resp = await client.get("/readyz")
+        assert resp.status_code == 503
+        assert resp.json() == {"status": "not_ready", "checks": {"database": "unavailable"}}
+
+
+  new: |2+
+        resp = await client.get("/readyz")
+        assert resp.status_code == 503
+        assert resp.json()["status"] == "not_ready"
+        assert resp.json()["checks"]["database"] == "unavailable"
+
+
+...

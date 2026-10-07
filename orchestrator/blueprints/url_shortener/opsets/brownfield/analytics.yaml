@@ -1,0 +1,203 @@
+summary: Click analytics off the hot path (bounded queue + batch writer), stats endpoint, retention purge
+rationale: The redirect only enqueues (put_nowait) and never awaits analytics I/O; a background writer
+  batches inserts and a purger enforces analytics_retention_days. Unique visitors use a daily-salted HMAC
+  so no PII is stored and hashes cannot be correlated across days. Failures are counted and logged without
+  PII and never propagate to the redirect.
+alternatives:
+- 'FastAPI BackgroundTasks per request: rejected, no batching or back-pressure, one insert per click'
+- 'External queue (Kafka/SQS): deferred, documented scaling path'
+ops:
+- op: replace
+  path: service/api/redirect.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+    """Public redirect endpoint (registered last so fixed routes win)."""
+
+    from typing import Annotated
+
+    from fastapi import APIRouter, Depends, Path
+    from fastapi.responses import RedirectResponse
+
+    from service.api.deps import get_link_service
+    from service.links import LinkService
+
+    router = APIRouter(tags=["redirect"])
+
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.analytics
+    """Public redirect endpoint (registered last so fixed routes win)."""
+
+    from typing import Annotated
+
+    from fastapi import APIRouter, Depends, Path, Request
+    from fastapi.responses import RedirectResponse
+
+    from service.analytics import ClickEvent
+    from service.api.deps import get_link_service
+    from service.db import utcnow
+    from service.links import LinkService
+    from service.observability import get_logger
+
+    router = APIRouter(tags=["redirect"])
+    log = get_logger("redirect")
+
+
+    def record_click(request: Request, link_id: int) -> None:
+        """Hand the click to the background recorder; never raises (analytics cannot fail redirects)."""
+        try:
+            recorder = getattr(request.app.state, "recorder", None)
+            if recorder is None:
+                return
+            recorder.record(
+                ClickEvent(
+                    link_id=link_id,
+                    occurred_at=utcnow(),
+                    ip=request.client.host if request.client else "",
+                    user_agent=request.headers.get("user-agent", ""),
+                    referrer=request.headers.get("referer"),
+                )
+            )
+        except Exception as exc:
+            log.warning("click not recorded", extra={"error": type(exc).__name__})
+
+
+- op: replace
+  path: service/api/redirect.py
+  old: |
+    )
+    async def follow(
+        code: Annotated[str, Path(min_length=1, max_length=64)],
+        service: Annotated[LinkService, Depends(get_link_service)],
+    ) -> RedirectResponse:
+        link = await service.resolve(code)
+        return RedirectResponse(
+            link.target_url,
+  new: |
+    )
+    async def follow(
+        request: Request,
+        code: Annotated[str, Path(min_length=1, max_length=64)],
+        service: Annotated[LinkService, Depends(get_link_service)],
+    ) -> RedirectResponse:
+        link = await service.resolve(code)
+        record_click(request, link.id)
+        return RedirectResponse(
+            link.target_url,
+- op: replace
+  path: service/app.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    """Application factory."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
+    """Application factory."""
+
+- op: replace
+  path: service/app.py
+  old: |2
+
+    from service import __version__
+    from service.api import health, links, redirect
+    from service.api.middleware import (
+        BodySizeLimitMiddleware,
+  new: |2
+
+    from service import __version__
+    from service.analytics import ClickRecorder
+    from service.api import health, links, redirect, stats
+    from service.api.middleware import (
+        BodySizeLimitMiddleware,
+- op: replace
+  path: service/app.py
+  old: |2+
+                await migrate(settings.database_url)
+            app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
+            log.info("startup complete", extra={"environment": settings.environment})
+            try:
+                yield
+            finally:
+                await app.state.db.dispose()
+
+  new: |2+
+                await migrate(settings.database_url)
+            app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
+            app.state.recorder = None
+            if settings.analytics_enabled:
+                app.state.recorder = ClickRecorder(
+                    app.state.db.sessionmaker,
+                    secret=settings.analytics_salt_secret.get_secret_value(),
+                    queue_size=settings.analytics_queue_size,
+                    batch_size=settings.analytics_batch_size,
+                    retention_days=settings.analytics_retention_days,
+                    purge_interval_s=settings.analytics_purge_interval_s,
+                )
+                await app.state.recorder.start()
+            log.info("startup complete", extra={"environment": settings.environment})
+            try:
+                yield
+            finally:
+                if app.state.recorder is not None:
+                    await app.state.recorder.stop()
+                await app.state.db.dispose()
+
+- op: replace
+  path: service/app.py
+  old: |2
+        app.include_router(health.router)
+        app.include_router(links.router)
+        app.include_router(redirect.router)  # catch-all /{code}: keep last
+        return app
+  new: |2
+        app.include_router(health.router)
+        app.include_router(links.router)
+        app.include_router(stats.router)
+        app.include_router(redirect.router)  # catch-all /{code}: keep last
+        return app
+- op: replace
+  path: service/config.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+
+    from functools import lru_cache
+    from typing import Literal
+
+    from pydantic import Field, field_validator
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
+    """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+
+    import secrets
+    from functools import lru_cache
+    from typing import Literal
+
+    from pydantic import Field, SecretStr, field_validator
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+
+- op: replace
+  path: service/config.py
+  old: |2
+        log_json: bool = True
+
+        @field_validator("base_url")
+        @classmethod
+  new: |2
+        log_json: bool = True
+
+        analytics_enabled: bool = True
+        # Set SHORTENER_ANALYTICS_SALT_SECRET in production; the random default means unique-visitor
+        # hashes are only stable for the lifetime of one process.
+        analytics_salt_secret: SecretStr = Field(
+            default_factory=lambda: SecretStr(secrets.token_hex(32))
+        )
+        analytics_retention_days: int = Field(90, ge=1, le=3650)
+        analytics_queue_size: int = Field(10_000, ge=1)
+        analytics_batch_size: int = Field(200, ge=1, le=10_000)
+        analytics_purge_interval_s: float = Field(3600.0, gt=0)
+
+        @field_validator("base_url")
+        @classmethod

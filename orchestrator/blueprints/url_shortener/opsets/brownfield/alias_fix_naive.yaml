@@ -1,0 +1,14 @@
+summary: Lower-case every code on lookup
+rationale: Aliases are stored lower case, so normalising the requested code to lower case makes alias
+  lookups case-insensitive.
+alternatives: []
+ops:
+- op: replace
+  path: service/repository.py
+  old: |2
+        async def get_by_code(self, code: str) -> Link | None:
+            result = await self.session.execute(select(Link).where(Link.code == code))
+  new: |2
+        async def get_by_code(self, code: str) -> Link | None:
+            # Aliases are stored lower-cased, so normalise the lookup the same way.
+            result = await self.session.execute(select(Link).where(Link.code == code.lower()))

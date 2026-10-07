@@ -1,0 +1,181 @@
+summary: Optional expires_at on create/PATCH; expired links return 410; metadata reports is_expired
+rationale: Expiry is evaluated at read time against UTC now, so no scheduler is required and behaviour
+  is exact. expires_at must be timezone-aware and in the future; PATCH with null clears it.
+alternatives:
+- 'Background job flipping a flag: rejected, adds moving parts and a lag window'
+ops:
+- op: replace
+  path: service/links.py
+  old: |
+    # lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+    """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+
+    import hashlib
+    import json
+
+    from sqlalchemy.exc import IntegrityError
+  new: |
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
+    """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+
+    import hashlib
+    import json
+    from datetime import datetime
+
+    from sqlalchemy.exc import IntegrityError
+- op: replace
+  path: service/links.py
+  old: |2+
+
+    log = get_logger("links")
+
+
+  new: |2+
+
+    log = get_logger("links")
+
+
+    def is_expired(link: Link, now: datetime | None = None) -> bool:
+        return link.expires_at is not None and link.expires_at <= (now or utcnow())
+
+
+    def validate_expiry(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise InvalidInputError("expires_at must include a timezone offset")
+        if value <= utcnow():
+            raise InvalidInputError("expires_at must be in the future")
+        return value
+
+
+- op: replace
+  path: service/links.py
+  old: |2+
+                created_at=link.created_at,
+                updated_at=link.updated_at,
+            )
+
+  new: |2+
+                created_at=link.created_at,
+                updated_at=link.updated_at,
+                expires_at=link.expires_at,
+                is_expired=is_expired(link),
+            )
+
+- op: replace
+  path: service/links.py
+  old: |2
+            except UrlError as exc:
+                raise InvalidInputError(str(exc)) from exc
+            digest = fingerprint(payload)
+            if idempotency_key:
+  new: |2
+            except UrlError as exc:
+                raise InvalidInputError(str(exc)) from exc
+            expires_at = validate_expiry(payload.expires_at)
+            digest = fingerprint(payload)
+            if idempotency_key:
+- op: replace
+  path: service/links.py
+  old: |2
+                    is_custom=payload.custom_alias is not None,
+                    tags=list(payload.tags),
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=digest if idempotency_key else None,
+  new: |2
+                    is_custom=payload.custom_alias is not None,
+                    tags=list(payload.tags),
+                    expires_at=expires_at,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=digest if idempotency_key else None,
+- op: replace
+  path: service/links.py
+  old: |2
+
+        async def resolve(self, code: str) -> Link:
+            """Look up a link for redirecting; raises 404 for unknown and 410 for gone links."""
+            link = await self.repo.get_by_code(code)
+            if link is None:
+  new: |2
+
+        async def resolve(self, code: str) -> Link:
+            """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
+            link = await self.repo.get_by_code(code)
+            if link is None:
+- op: replace
+  path: service/links.py
+  old: |2+
+            if link.deleted_at is not None or link.disabled:
+                raise GoneError(f"link '{code}' is no longer available")
+            return link
+
+  new: |2+
+            if link.deleted_at is not None or link.disabled:
+                raise GoneError(f"link '{code}' is no longer available")
+            if is_expired(link):
+                raise GoneError(f"link '{code}' has expired")
+            return link
+
+- op: replace
+  path: service/links.py
+  old: |2
+            if patch.disabled is not None:
+                link.disabled = patch.disabled
+            link.updated_at = utcnow()
+            await self.session.commit()
+  new: |2
+            if patch.disabled is not None:
+                link.disabled = patch.disabled
+            if "expires_at" in patch.model_fields_set:
+                link.expires_at = validate_expiry(patch.expires_at)
+            link.updated_at = utcnow()
+            await self.session.commit()
+- op: replace
+  path: service/schemas.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+    """Public API models."""
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
+    """Public API models."""
+
+- op: replace
+  path: service/schemas.py
+  old: |2+
+        custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
+        tags: list[Tag] = Field(default_factory=list, max_length=10)
+
+
+  new: |2+
+        custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
+        tags: list[Tag] = Field(default_factory=list, max_length=10)
+        expires_at: datetime | None = Field(
+            None, description="Timezone-aware expiry (must be in the future)"
+        )
+
+
+- op: replace
+  path: service/schemas.py
+  old: |2
+
+        disabled: bool | None = None
+
+        @model_validator(mode="after")
+  new: |2
+
+        disabled: bool | None = None
+        expires_at: datetime | None = Field(None, description="Set a new expiry; null clears it")
+
+        @model_validator(mode="after")
+- op: replace
+  path: service/schemas.py
+  old: |2
+        created_at: datetime
+        updated_at: datetime
+  new: |2
+        created_at: datetime
+        updated_at: datetime
+        expires_at: datetime | None = None
+        is_expired: bool = False

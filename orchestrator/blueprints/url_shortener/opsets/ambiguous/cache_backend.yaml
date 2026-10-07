@@ -1,0 +1,6 @@
+summary: Cache abstraction - bounded in-memory TTL LRU and a Redis backend
+rationale: 'One protocol, two backends: the in-memory LRU keeps the single-process default dependency-free,
+  Redis shares state across replicas. Values are small JSON strings; TTLs are enforced per entry.'
+alternatives:
+- 'cachetools TTLCache: rejected, a new dependency for 40 lines of code'
+ops: []

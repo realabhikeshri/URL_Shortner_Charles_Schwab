@@ -1,0 +1,20 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "blocking": [],
+      "findings": [
+        "large change: docs/openapi.json (+454)"
+      ],
+      "summary": "8/8 acceptance criteria verified by passing tests; 40 files changed.",
+      "verdict": "approve"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 1355,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 40
+  },
+  "role": "Reviewer",
+  "schema": "ReviewReport",
+  "task": "review"
+}

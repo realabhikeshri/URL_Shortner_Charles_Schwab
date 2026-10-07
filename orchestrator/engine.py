@@ -158,6 +158,7 @@ class Orchestrator:
         self._rng = random.Random(sha256_json(self.run_id))  # noqa: S311 - jitter only
         self._stop_reason: str | None = None
         self._pending_replan_gate: str | None = None
+        self._holding = False
 
     # ================================================================== lifecycle
 
@@ -206,7 +207,9 @@ class Orchestrator:
         if self.ws is not None:
             await self.ws.init_git()
             if self.store.kv_get("baseline_commit") is None:
-                self.store.kv_set("baseline_commit", await self.ws.head())
+                baseline = await self.ws.head()
+                self.store.kv_set("baseline_commit", baseline)
+                self.context.publish("baseline", {"commit": baseline}, node_id="engine")
         self.audit.append("run_started", run_id=self.run_id)
         return await self._execute()
 
@@ -242,8 +245,21 @@ class Orchestrator:
             if self._stop_reason is None:
                 self._check_stop()
             if self._stop_reason is None and not running:
-                await self._check_replan()
-            if self._stop_reason is None and self._pending_replan_gate is None:
+                try:
+                    await self._check_replan()
+                except Exception as exc:  # an invalid re-plan must stop safely, not crash
+                    self._stop_reason = f"re-planning failed: {exc}"
+                    self.audit.append("replan_failed", error=str(exc)[:2000])
+                    self.audit.append("safe_stop", reason=self._stop_reason)
+            # A changed requirement freezes scheduling: in-flight nodes drain, then the run is
+            # re-planned before any node of the stale plan starts.
+            hold = bool(running) and self._requirement_changed()
+            if hold and not self._holding:
+                self.audit.append(
+                    "scheduling_held", reason="requirement changed; draining in-flight nodes"
+                )
+            self._holding = hold
+            if self._stop_reason is None and self._pending_replan_gate is None and not hold:
                 self._promote_ready()
                 for node in self._ready_nodes():
                     if len(running) >= self.config.concurrency:
@@ -257,10 +273,10 @@ class Orchestrator:
             for task in done:
                 node_id = next(k for k, v in running.items() if v is task)
                 del running[node_id]
-                exc = task.exception()
-                if exc is not None:  # defensive: _run_node handles its own errors
-                    self.audit.append("node_crashed", node_id=node_id, error=repr(exc))
-                    self._fail_node(node_id, f"engine error: {exc!r}")
+                crash = task.exception()
+                if crash is not None:  # defensive: _run_node handles its own errors
+                    self.audit.append("node_crashed", node_id=node_id, error=repr(crash))
+                    self._fail_node(node_id, f"engine error: {crash!r}")
         final = self._final_state()
         self.store.set_run_state(final)
         self.audit.append(
@@ -717,6 +733,12 @@ class Orchestrator:
             if key == "approval_request":
                 continue
             self.context.publish(key, value, node_id=node.id, paths=files)
+        gates = [
+            {"gate": g["gate"], "passed": g["passed"], "details": g["details"][:500]}
+            for g in self.store.gate_results()
+            if g["node_id"] == node.id and g["attempt"] == attempt and g["phase"] == "exit"
+        ]
+        self.context.publish(f"gates:{node.id}", gates, node_id=node.id)
         if files:
             self.context.publish(
                 f"changes:{node.id}",
@@ -923,6 +945,11 @@ class Orchestrator:
 
     # ================================================================== dynamic re-planning
 
+    def _requirement_changed(self) -> bool:
+        recorded = self.store.kv_get("requirement_hash")
+        current = sha256_file(Path(self.store.run()["requirement_path"]))
+        return recorded is not None and current != recorded
+
     async def _check_replan(self) -> None:
         """Detect upstream changes (requirement edited, produced files edited by a human)."""
         if self._pending_replan_gate is not None:
@@ -1012,6 +1039,10 @@ class Orchestrator:
         self.store.kv_set("requirement_hash", sha256_file(req_path))
         self.store.kv_set("replans", n)
         if self.ws is not None and drifted:
+            await self.ws.commit(
+                sorted(drifted),
+                f"human edit detected by {replan_id}\n\nrun: {self.run_id}\nnode: human-edit",
+            )
             self._update_manifest(sorted(drifted), "human-edit")
         parent = self.decisions.latest_for_nodes(["plan"])
         decision = self.decisions.record(

@@ -1,0 +1,40 @@
+# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
+"""Public API models."""
+
+from datetime import datetime
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+Tag = Annotated[str, StringConstraints(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")]
+
+
+class LinkCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=8192, examples=["https://example.com/docs"])
+    custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
+    tags: list[Tag] = Field(default_factory=list, max_length=10)
+
+
+class LinkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    disabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "LinkUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+class LinkOut(BaseModel):
+    code: str
+    short_url: str
+    target_url: str
+    is_custom: bool
+    tags: list[str]
+    disabled: bool
+    created_at: datetime
+    updated_at: datetime

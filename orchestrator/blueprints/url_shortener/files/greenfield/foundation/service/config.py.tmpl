@@ -1,0 +1,41 @@
+# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+"""Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHORTENER_", env_file=".env", extra="ignore")
+
+    app_name: str = "url-shortener"
+    environment: Literal["dev", "test", "prod"] = "dev"
+    base_url: str = "http://localhost:8000"
+    database_url: str = "sqlite+aiosqlite:///./shortener.db"
+    db_auto_migrate: bool = True
+    db_pool_size: int = Field(10, ge=1, le=100)
+
+    redirect_status_code: Literal[302, 307] = 302
+    code_length: int = Field(7, ge=5, le=12)
+    code_max_attempts: int = Field(5, ge=1, le=20)
+    allow_private_hosts: bool = False
+    max_url_length: int = Field(2048, ge=64, le=8192)
+    max_request_body_bytes: int = Field(16_384, ge=1024)
+
+    cors_origins: list[str] = Field(default_factory=list)
+    hsts_enabled: bool = False
+    log_level: str = "INFO"
+    log_json: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

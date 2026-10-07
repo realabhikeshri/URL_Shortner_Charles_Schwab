@@ -1,0 +1,395 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "nodes": [
+        {
+          "agent": "Architect",
+          "depends_on": [],
+          "effort_points": 3,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "has_output"
+          ],
+          "id": "design.architecture",
+          "inputs": [
+            "spec",
+            "impact"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "design"
+          ],
+          "params": {},
+          "risk": "low",
+          "title": "Design: URL shortener core service",
+          "type": "design",
+          "write_paths": [
+            "docs/design/architecture.md"
+          ]
+        },
+        {
+          "agent": "Implementer",
+          "depends_on": [
+            "design.architecture"
+          ],
+          "effort_points": 5,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "migrations_apply",
+            "targeted_tests"
+          ],
+          "id": "implement.foundation",
+          "inputs": [
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "code:foundation"
+          ],
+          "params": {
+            "blueprint": "greenfield/foundation",
+            "tests": [
+              "tests/service/test_health.py"
+            ]
+          },
+          "risk": "medium",
+          "title": "Settings, DB layer, migration 0001, logging, errors, middleware, health",
+          "type": "implement",
+          "write_paths": [
+            "pyproject.toml",
+            "service/__init__.py",
+            "service/config.py",
+            "service/observability.py",
+            "service/errors.py",
+            "service/db.py",
+            "service/models.py",
+            "service/alembic.ini",
+            "service/migrations/**",
+            "service/api/__init__.py",
+            "service/api/middleware.py",
+            "service/api/deps.py",
+            "service/api/health.py",
+            "service/app.py",
+            "service/domain/__init__.py",
+            "tests/__init__.py",
+            "tests/service/__init__.py",
+            "tests/service/conftest.py",
+            "tests/service/test_health.py"
+          ]
+        },
+        {
+          "agent": "Implementer",
+          "depends_on": [
+            "implement.foundation"
+          ],
+          "effort_points": 2,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "targeted_tests"
+          ],
+          "id": "implement.codes",
+          "inputs": [
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "code:codes"
+          ],
+          "params": {
+            "blueprint": "greenfield/codes",
+            "tests": [
+              "tests/service/test_codes.py"
+            ]
+          },
+          "risk": "low",
+          "title": "Base62 code generation and alias validation",
+          "type": "implement",
+          "write_paths": [
+            "service/domain/codes.py",
+            "tests/service/test_codes.py"
+          ]
+        },
+        {
+          "agent": "Implementer",
+          "depends_on": [
+            "implement.foundation"
+          ],
+          "effort_points": 3,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "targeted_tests"
+          ],
+          "id": "implement.urls",
+          "inputs": [
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "code:urls"
+          ],
+          "params": {
+            "blueprint": "greenfield/urls",
+            "tests": [
+              "tests/service/test_urls.py"
+            ]
+          },
+          "risk": "medium",
+          "title": "URL validation and normalisation",
+          "type": "implement",
+          "write_paths": [
+            "service/domain/urls.py",
+            "tests/service/test_urls.py"
+          ]
+        },
+        {
+          "agent": "Implementer",
+          "depends_on": [
+            "implement.codes",
+            "implement.urls"
+          ],
+          "effort_points": 5,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "targeted_tests"
+          ],
+          "id": "implement.links_api",
+          "inputs": [
+            "design",
+            "code:codes",
+            "code:urls"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "code:links_api"
+          ],
+          "params": {
+            "blueprint": "greenfield/links_api",
+            "tests": [
+              "tests/service/test_api_links.py"
+            ]
+          },
+          "risk": "medium",
+          "title": "Links API, LinkService, repository and redirect",
+          "type": "implement",
+          "write_paths": [
+            "service/schemas.py",
+            "service/repository.py",
+            "service/links.py",
+            "service/api/links.py",
+            "service/api/redirect.py",
+            "service/api/deps.py",
+            "service/app.py",
+            "tests/service/test_api_links.py"
+          ]
+        },
+        {
+          "agent": "TestEngineer",
+          "depends_on": [
+            "implement.links_api"
+          ],
+          "effort_points": 2,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "targeted_tests"
+          ],
+          "id": "test.properties",
+          "inputs": [
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "tests:properties"
+          ],
+          "params": {
+            "blueprint": "greenfield/test_properties",
+            "tests": [
+              "tests/service/test_properties.py"
+            ]
+          },
+          "risk": "low",
+          "title": "Property-based tests (hypothesis) for codes and URLs",
+          "type": "test",
+          "write_paths": [
+            "tests/service/test_properties.py"
+          ]
+        },
+        {
+          "agent": "TestEngineer",
+          "depends_on": [
+            "implement.links_api"
+          ],
+          "effort_points": 3,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "compiles",
+            "lint_clean",
+            "targeted_tests"
+          ],
+          "id": "test.integration",
+          "inputs": [
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "tests:integration"
+          ],
+          "params": {
+            "blueprint": "greenfield/test_integration",
+            "tests": [
+              "tests/service/test_integration.py"
+            ]
+          },
+          "risk": "low",
+          "title": "API integration tests incl. concurrency, collisions and migrations",
+          "type": "test",
+          "write_paths": [
+            "tests/service/test_integration.py"
+          ]
+        },
+        {
+          "agent": "DocWriter",
+          "depends_on": [
+            "implement.links_api"
+          ],
+          "effort_points": 2,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "has_output",
+            "changelog_entry"
+          ],
+          "id": "document.architecture",
+          "inputs": [
+            "spec",
+            "design"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "docs"
+          ],
+          "params": {},
+          "risk": "low",
+          "title": "README, API reference, OpenAPI export and CHANGELOG",
+          "type": "document",
+          "write_paths": [
+            "README.md",
+            "CHANGELOG.md",
+            "docs/service/**",
+            "docs/openapi.json"
+          ]
+        },
+        {
+          "agent": "TestEngineer",
+          "depends_on": [
+            "implement.links_api",
+            "test.integration",
+            "test.properties"
+          ],
+          "effort_points": 1,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "coverage:85"
+          ],
+          "id": "test.coverage",
+          "inputs": [
+            "spec"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "test_report"
+          ],
+          "params": {
+            "mode": "coverage"
+          },
+          "risk": "low",
+          "title": "Full service suite with coverage gate (>= 85%)",
+          "type": "test",
+          "write_paths": []
+        },
+        {
+          "agent": "Reviewer",
+          "depends_on": [
+            "document.architecture",
+            "test.coverage"
+          ],
+          "effort_points": 2,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "review_approved"
+          ],
+          "id": "review.code",
+          "inputs": [
+            "spec",
+            "test_report"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "review"
+          ],
+          "params": {},
+          "risk": "low",
+          "title": "Review diff against acceptance criteria and policies",
+          "type": "review",
+          "write_paths": []
+        },
+        {
+          "agent": "ReleaseManager",
+          "depends_on": [
+            "review.code"
+          ],
+          "effort_points": 1,
+          "entry_criteria": [],
+          "exit_criteria": [
+            "typecheck",
+            "changelog_entry",
+            "release_ready"
+          ],
+          "id": "release.readiness",
+          "inputs": [
+            "spec",
+            "review"
+          ],
+          "max_attempts": 3,
+          "optional": false,
+          "outputs": [
+            "release"
+          ],
+          "params": {},
+          "risk": "medium",
+          "title": "Release readiness: policies, typecheck, changelog, sign-off",
+          "type": "release_check",
+          "write_paths": []
+        }
+      ],
+      "rationale": "Capabilities ['core'] decomposed from the catalog. Independent work runs in parallel (implement.codes, implement.foundation, implement.urls); tests and docs branch after implementation and join at review; release waits for review.",
+      "version": 1
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 1066,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 1515
+  },
+  "role": "Planner",
+  "schema": "PlanDAG",
+  "task": "plan"
+}

@@ -130,6 +130,10 @@ def _node_tests(ctx: GateContext) -> list[str]:
     return [str(t) for t in tests]
 
 
+# Quiet output, short tracebacks, a FAILED/ERROR summary and no captured-log noise: the tail of
+# this output is fed back to the agent as repair feedback, so it must lead with the failure.
+PYTEST_FLAGS = ("-q", "-p", "no:cacheprovider", "--tb=short", "-rfE", "--show-capture=no")
+
 _SUMMARY = re.compile(r"=+ (.*?(?:passed|failed|error).*?) in [\d.]+s")
 
 
@@ -144,7 +148,7 @@ async def targeted_tests(ctx: GateContext, _: str | None) -> GateResult:
     tests = [t for t in _node_tests(ctx) if ws.exists(t.split("::")[0])]
     if not tests:
         return _fail("no targeted tests exist for this node (a change must be covered by tests)")
-    res = await ws.run_python("-m", "pytest", "-q", "-p", "no:cacheprovider", *tests, timeout_s=600)
+    res = await ws.run_python("-m", "pytest", *PYTEST_FLAGS, *tests, timeout_s=600)
     summary = _pytest_summary(res.stdout)
     return _ok(f"{summary} [{', '.join(tests)}]") if res.ok else _fail(res.tail(60))
 
@@ -156,7 +160,7 @@ async def tests_fail_first(ctx: GateContext, _: str | None) -> GateResult:
     tests = _node_tests(ctx)
     if not tests:
         return _fail("no regression tests declared")
-    res = await ws.run_python("-m", "pytest", "-q", "-p", "no:cacheprovider", *tests, timeout_s=600)
+    res = await ws.run_python("-m", "pytest", *PYTEST_FLAGS, *tests, timeout_s=600)
     if res.returncode == 1:
         return _ok(
             f"regression test fails as expected before the fix: {_pytest_summary(res.stdout)}"
@@ -178,9 +182,7 @@ async def coverage(ctx: GateContext, arg: str | None) -> GateResult:
     res = await ws.run_python(
         "-m",
         "pytest",
-        "-q",
-        "-p",
-        "no:cacheprovider",
+        *PYTEST_FLAGS,
         "--cov=service",
         "--cov-report=term",
         "tests/service",

@@ -1,0 +1,8 @@
+summary: Target URL validation and normalisation (http/https only, no private hosts, no credentials)
+rationale: >-
+  Shorteners are abused for phishing and SSRF-style probing. Only http/https are accepted, embedded
+  credentials are rejected, private/loopback/link-local IP literals and local host names are refused by
+  default (configurable), and the URL is normalised so equivalent inputs store identically.
+alternatives:
+  - "Resolve DNS to block private targets: deferred, adds latency and is racy (DNS rebinding); documented"
+ops: []

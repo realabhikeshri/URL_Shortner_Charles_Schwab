@@ -1,0 +1,60 @@
+summary: Links API - create (idempotent), metadata, patch, soft delete, and the public redirect
+rationale: >-
+  LinkService holds the use cases; the repository isolates SQL. Create supports Idempotency-Key with a
+  request fingerprint (replay returns the original link, misuse returns 409). Redirect returns 302 by
+  default (307 configurable) with Cache-Control no-store so every click reaches the service.
+  Custom aliases are stored in canonical lower case and alias conflicts are checked case-insensitively.
+  NOTE (deliberate, documented): lookups use exact matching, so an alias created as 'MyLink' is not
+  reachable at /MyLink. This is the seeded defect fixed by the brownfield scenario.
+alternatives:
+  - "301 redirects: rejected, browsers cache them permanently which breaks disable/delete and analytics"
+ops:
+  - op: replace
+    path: service/api/deps.py
+    old: |
+      from collections.abc import AsyncIterator
+
+      from fastapi import Request
+    new: |
+      from collections.abc import AsyncIterator
+      from typing import Annotated
+
+      from fastapi import Depends, Request
+  - op: replace
+    path: service/api/deps.py
+    old: |
+      from service.db import Database
+    new: |
+      from service.db import Database
+      from service.links import LinkService
+  - op: replace
+    path: service/api/deps.py
+    old: |
+      async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+          async with get_database(request).session() as session:
+              yield session
+    new: |
+      async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+          async with get_database(request).session() as session:
+              yield session
+
+
+      async def get_link_service(
+          session: Annotated[AsyncSession, Depends(get_session)],
+          settings: Annotated[Settings, Depends(get_settings)],
+      ) -> LinkService:
+          return LinkService(session, settings)
+  - op: replace
+    path: service/app.py
+    old: |
+      from service.api import health
+    new: |
+      from service.api import health, links, redirect
+  - op: replace
+    path: service/app.py
+    old: |
+      app.include_router(health.router)
+    new: |
+      app.include_router(health.router)
+          app.include_router(links.router)
+          app.include_router(redirect.router)  # catch-all /{code}: keep last

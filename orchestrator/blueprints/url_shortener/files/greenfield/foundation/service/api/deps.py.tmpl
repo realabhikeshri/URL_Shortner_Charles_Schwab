@@ -1,0 +1,25 @@
+# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+"""FastAPI dependencies shared by the routers."""
+
+from collections.abc import AsyncIterator
+
+from fastapi import Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from service.config import Settings
+from service.db import Database
+
+
+def get_settings(request: Request) -> Settings:
+    settings: Settings = request.app.state.settings
+    return settings
+
+
+def get_database(request: Request) -> Database:
+    database: Database = request.app.state.db
+    return database
+
+
+async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+    async with get_database(request).session() as session:
+        yield session

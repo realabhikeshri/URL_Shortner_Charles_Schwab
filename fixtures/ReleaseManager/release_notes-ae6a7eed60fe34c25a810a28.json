@@ -1,0 +1,23 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "highlights": [
+        "Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.",
+        "Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.",
+        "Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.",
+        "Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.",
+        "Persist links in a relational database managed by reversible migrations."
+      ],
+      "notes": "REQ-GF-001: Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests.",
+      "version": "unreleased"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 1044,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 163
+  },
+  "role": "ReleaseManager",
+  "schema": "ReleaseNotes",
+  "task": "release_notes"
+}

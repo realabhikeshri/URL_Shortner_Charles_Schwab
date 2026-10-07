@@ -1,0 +1,52 @@
+summary: Migration 0002 - links.expires_at and the clicks table, plus models
+rationale: 'Additive and reversible: a nullable column and a new table with a composite (link_id, day)
+  index for the stats queries. SQLite needs batch mode for ALTER, Postgres does not; env.py selects it.
+  The clicks table has no IP or user-agent column by design.'
+alternatives:
+- 'Store raw IP/UA and aggregate later: rejected, violates data minimisation (CMP policy)'
+- 'Separate analytics database: deferred, documented as the scaling path'
+ops:
+- op: replace
+  path: service/models.py
+  old: |+
+    # lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+    """Persistence model."""
+
+    from datetime import datetime
+
+    from sqlalchemy import JSON, Boolean, Integer, String, Text
+    from sqlalchemy.orm import Mapped, mapped_column
+
+  new: |+
+    # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.migration_0002
+    """Persistence model."""
+
+    from datetime import date, datetime
+
+    from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, String, Text
+    from sqlalchemy.orm import Mapped, mapped_column
+
+- op: replace
+  path: service/models.py
+  old: |2
+        idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+        request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+  new: |2
+        idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+        request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+        expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+    class Click(Base):
+        """One redirect. Stores no raw IP or user agent: only a daily-salted visitor hash."""
+
+        __tablename__ = "clicks"
+        __table_args__ = (Index("ix_clicks_link_day", "link_id", "day"),)
+
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        link_id: Mapped[int] = mapped_column(ForeignKey("links.id", ondelete="CASCADE"))
+        occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+        day: Mapped[date] = mapped_column(Date)
+        visitor_hash: Mapped[str] = mapped_column(String(64))
+        referrer_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+        ua_family: Mapped[str] = mapped_column(String(32))

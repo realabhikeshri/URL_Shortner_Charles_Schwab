@@ -1,0 +1,6 @@
+summary: Abuse tests - cross-tenant modification, malformed keys, idempotency scoping, per-key limits,
+  no keys in logs
+rationale: Attack-oriented tests for the new trust boundary, independent of the implementer's own tests.
+alternatives:
+- 'Rely on the implementer''s tests: rejected, separation of duties'
+ops: []

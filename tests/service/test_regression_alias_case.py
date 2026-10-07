@@ -1,0 +1,28 @@
+# lineage: REQ-BF-002 / test.regression_alias (see runs/ for the decision trail)
+"""Regression test for the alias case bug (written before the fix; it must fail first).
+
+Bug: aliases are canonicalised to lower case on creation (and conflicts are checked
+case-insensitively) but lookups were exact, so an alias created as 'MyLink' 404'd at /MyLink.
+"""
+
+from httpx import AsyncClient
+
+
+async def test_alias_lookup_is_case_insensitive(client: AsyncClient) -> None:
+    created = await client.post(
+        "/api/v1/links", json={"url": "https://example.com/promo", "custom_alias": "MyLink"}
+    )
+    assert created.status_code == 201
+    for path in ("/MyLink", "/mylink", "/MYLINK"):
+        resp = await client.get(path)
+        assert resp.status_code == 302, f"{path} -> {resp.status_code}"
+        assert resp.headers["location"] == "https://example.com/promo"
+
+
+async def test_alias_metadata_lookup_is_case_insensitive(client: AsyncClient) -> None:
+    await client.post(
+        "/api/v1/links", json={"url": "https://example.com/x", "custom_alias": "Docs-2026"}
+    )
+    resp = await client.get("/api/v1/links/DOCS-2026")
+    assert resp.status_code == 200
+    assert resp.json()["code"] == "docs-2026"

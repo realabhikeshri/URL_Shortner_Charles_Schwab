@@ -209,6 +209,8 @@ class Workspace:
         if op.old is None or op.new is None:
             raise ApplyError(f"replace {rel}: old/new required")
         count = current.count(op.old)
+        if count == 0 and current.count(op.new) == 1:
+            return current  # edit already present: re-applying an invalidated node is a no-op
         if count != 1:
             raise ApplyError(
                 f"replace {rel}: anchor found {count} times (must be exactly once): "
@@ -290,12 +292,13 @@ class Workspace:
         return (await self._git("rev-parse", "HEAD")).stdout.strip()
 
     async def checkpoint(self, label: str) -> str:
-        """Commit any pending changes (e.g. human edits) and return HEAD as the checkpoint."""
+        """Return HEAD as the restore point for a node attempt.
+
+        Nothing is committed here: parallel nodes may have uncommitted in-flight changes, and
+        each node commits only its own files on success, which keeps per-node attribution
+        (``git blame`` -> node -> decision) exact. Rollback is path-scoped to this HEAD.
+        """
         async with self._git_lock:
-            status = await self._git("status", "--porcelain")
-            if status.stdout.strip():
-                await self._git("add", "-A")
-                await self._git("commit", "-q", "-m", f"checkpoint: {label}")
             return await self.head()
 
     async def commit(self, paths: Sequence[str], message: str) -> str | None:
@@ -372,9 +375,19 @@ class ToolBelt:
         self._require("read")
         return self.workspace.list_files(pattern)
 
-    async def run(self, argv: Sequence[str], *, timeout_s: float | None = None) -> CommandResult:
+    @property
+    def python(self) -> str:
+        return self.workspace.python
+
+    async def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
         self._require("run")
-        return await self.workspace.run(argv, timeout_s=timeout_s)
+        return await self.workspace.run(argv, timeout_s=timeout_s, env=env)
 
     async def run_python(self, *args: str, timeout_s: float | None = None) -> CommandResult:
         self._require("run")

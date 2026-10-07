@@ -1,0 +1,36 @@
+{
+  "recorded_from": "deterministic",
+  "response": {
+    "content": {
+      "alternatives": [
+        "Sequential ids encoded in base62: rejected, enumerable and leaks volume",
+        "Hash of the URL: rejected, same URL from different users would collide by design"
+      ],
+      "ops": [
+        {
+          "content": "# lineage: REQ-GF-001 / implement.codes (see runs/ for the decision trail)\n\"\"\"Short-code generation (base62) and custom-alias validation.\n\nCapacity: 62**7 ~= 3.52e12 codes. With n links stored, a fresh random code collides with\nprobability n / 62**7 (1e9 links -> 2.8e-4). Generation retries up to ``max_attempts`` times,\nso an exhausted retry budget needs (n / 62**7) ** attempts: ~1.7e-18 at 1e9 links with 5 tries.\nThe database unique constraint remains the final arbiter for races between writers.\n\"\"\"\n\nimport re\nimport secrets\nimport string\n\nALPHABET = string.digits + string.ascii_uppercase + string.ascii_lowercase\nBASE = len(ALPHABET)\n_INDEX = {ch: i for i, ch in enumerate(ALPHABET)}\n\nALIAS_PATTERN = re.compile(r\"^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$\")\nRESERVED = frozenset(\n    {\n        \"api\",\n        \"healthz\",\n        \"readyz\",\n        \"metrics\",\n        \"docs\",\n        \"redoc\",\n        \"openapi.json\",\n        \"static\",\n        \"admin\",\n        \"login\",\n        \"favicon.ico\",\n        \"robots.txt\",\n    }\n)\n\n\nclass AliasError(ValueError):\n    \"\"\"The requested custom alias is not acceptable.\"\"\"\n\n\ndef encode(number: int) -> str:\n    if number < 0:\n        raise ValueError(\"cannot encode negative numbers\")\n    if number == 0:\n        return ALPHABET[0]\n    digits = []\n    while number:\n        number, rem = divmod(number, BASE)\n        digits.append(ALPHABET[rem])\n    return \"\".join(reversed(digits))\n\n\ndef decode(code: str) -> int:\n    if not code:\n        raise ValueError(\"empty code\")\n    number = 0\n    for ch in code:\n        if ch not in _INDEX:\n            raise ValueError(f\"invalid base62 character {ch!r}\")\n        number = number * BASE + _INDEX[ch]\n    return number\n\n\ndef generate_code(length: int = 7) -> str:\n    \"\"\"Uniformly random base62 code of exactly ``length`` characters (CSPRNG).\"\"\"\n    return \"\".join(secrets.choice(ALPHABET) for _ in range(length))\n\n\ndef collision_probability(existing: int, length: int = 7) -> float:\n    \"\"\"Probability that one freshly generated code hits an existing one.\"\"\"\n    return existing / float(BASE**length)\n\n\ndef normalize_alias(alias: str) -> str:\n    \"\"\"Validate a custom alias and return its canonical (lower-case) form.\"\"\"\n    candidate = alias.strip()\n    if not ALIAS_PATTERN.match(candidate):\n        raise AliasError(\n            \"alias must be 3-32 characters of letters, digits, '-' or '_' \"\n            \"and start with a letter or digit\"\n        )\n    canonical = candidate.lower()\n    if canonical in RESERVED:\n        raise AliasError(f\"alias '{candidate}' is reserved\")\n    return canonical\n",
+          "new": null,
+          "old": null,
+          "op": "write",
+          "path": "service/domain/codes.py"
+        },
+        {
+          "content": "# lineage: REQ-GF-001 / implement.codes (see runs/ for the decision trail)\nimport pytest\n\nfrom service.domain.codes import (\n    ALPHABET,\n    AliasError,\n    collision_probability,\n    decode,\n    encode,\n    generate_code,\n    normalize_alias,\n)\n\n\n@pytest.mark.parametrize((\"number\", \"code\"), [(0, \"0\"), (61, \"z\"), (62, \"10\"), (3843, \"zz\")])\ndef test_encode_decode_known_values(number: int, code: str) -> None:\n    assert encode(number) == code\n    assert decode(code) == number\n\n\ndef test_encode_and_decode_reject_bad_input() -> None:\n    with pytest.raises(ValueError, match=\"negative\"):\n        encode(-1)\n    with pytest.raises(ValueError, match=\"empty\"):\n        decode(\"\")\n    with pytest.raises(ValueError, match=\"invalid base62\"):\n        decode(\"ab!\")\n\n\ndef test_generated_codes_have_exact_length_and_alphabet() -> None:\n    codes = {generate_code(7) for _ in range(500)}\n    assert all(len(c) == 7 and set(c) <= set(ALPHABET) for c in codes)\n    assert len(codes) == 500  # 62^7 space: duplicates in 500 draws would be astonishing\n\n\ndef test_collision_probability_matches_capacity_math() -> None:\n    assert collision_probability(0) == 0.0\n    assert collision_probability(1_000_000_000) == pytest.approx(2.84e-4, rel=0.01)\n\n\n@pytest.mark.parametrize(\n    (\"alias\", \"canonical\"),\n    [(\"launch-2026\", \"launch-2026\"), (\"My_Link\", \"my_link\"), (\"  abc  \", \"abc\")],\n)\ndef test_valid_aliases_are_canonicalised(alias: str, canonical: str) -> None:\n    assert normalize_alias(alias) == canonical\n\n\n@pytest.mark.parametrize(\"alias\", [\"ab\", \"-start\", \"has space\", \"x\" * 33, \"\u00fcn\u00efcode\", \"a/b\"])\ndef test_invalid_aliases_are_rejected(alias: str) -> None:\n    with pytest.raises(AliasError):\n        normalize_alias(alias)\n\n\n@pytest.mark.parametrize(\"alias\", [\"api\", \"healthz\", \"METRICS\", \"Docs\"])\ndef test_reserved_aliases_are_rejected(alias: str) -> None:\n    with pytest.raises(AliasError, match=\"reserved\"):\n        normalize_alias(alias)\n",
+          "new": null,
+          "old": null,
+          "op": "write",
+          "path": "tests/service/test_codes.py"
+        }
+      ],
+      "rationale": "7 random base62 characters give 62^7 = 3.5e12 codes; per-insert collision probability is n/62^7, so a bounded retry (5) plus the DB unique constraint is sufficient and avoids a central counter. Aliases are validated by regex (3-32 chars) and checked against reserved route names.",
+      "summary": "Base62 short-code generation (CSPRNG) and custom-alias validation with reserved words"
+    },
+    "cost_usd": 0.0,
+    "input_tokens": 266,
+    "model": "deterministic-rules-v1",
+    "output_tokens": 1481
+  },
+  "role": "Implementer",
+  "schema": "ChangeSet",
+  "task": "implement"
+}

@@ -1,0 +1,76 @@
+# lineage: REQ-GF-001 / implement.urls (see runs/ for the decision trail)
+"""Target-URL validation and normalisation.
+
+Rules: http/https only (javascript:, data:, file: and every other scheme are rejected), at most
+``max_length`` characters, a host is required, no embedded credentials (a phishing vector), and
+by default no loopback/private/link-local/reserved IP literals or local-only host names.
+Normalisation lower-cases scheme and host, IDNA-encodes the host, drops default ports and
+gives an empty path a ``/``. DNS is not resolved here (see docs/LIMITATIONS.md).
+"""
+
+import ipaddress
+from urllib.parse import urlsplit, urlunsplit
+
+ALLOWED_SCHEMES = frozenset({"http", "https"})
+DEFAULT_PORTS = {"http": 80, "https": 443}
+LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
+
+
+class UrlError(ValueError):
+    """The URL is not acceptable as a redirect target."""
+
+
+def _is_forbidden_ip(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def normalize_url(raw: str, *, max_length: int = 2048, allow_private: bool = False) -> str:
+    url = raw.strip()
+    if not url:
+        raise UrlError("url is empty")
+    if len(url) > max_length:
+        raise UrlError(f"url exceeds {max_length} characters")
+    if any(ch in url for ch in "\r\n\t\x00") or " " in url:
+        raise UrlError("url contains whitespace or control characters")
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise UrlError(f"scheme '{scheme or '(none)'}' is not allowed; use http or https")
+    if parts.username is not None or parts.password is not None:
+        raise UrlError("urls with embedded credentials are not allowed")
+    host = parts.hostname
+    if not host:
+        raise UrlError("url has no host")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise UrlError("url has an invalid port") from exc
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower() if not host.isascii() else host
+    except UnicodeError as exc:
+        raise UrlError("url host is not a valid domain name") from exc
+    ascii_host = ascii_host.lower().rstrip(".")
+    if not allow_private:
+        if _is_forbidden_ip(ascii_host):
+            raise UrlError("private, loopback and reserved addresses are not allowed")
+        if ascii_host == "localhost" or ascii_host.endswith(LOCAL_SUFFIXES):
+            raise UrlError("local host names are not allowed")
+    netloc = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
+    if port is not None and port != DEFAULT_PORTS[scheme]:
+        netloc = f"{netloc}:{port}"
+    path = parts.path or "/"
+    normalized = urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
+    if len(normalized) > max_length:
+        raise UrlError(f"url exceeds {max_length} characters")
+    return normalized

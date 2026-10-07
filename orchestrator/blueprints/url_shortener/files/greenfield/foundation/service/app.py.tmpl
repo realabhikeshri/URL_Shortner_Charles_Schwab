@@ -1,0 +1,60 @@
+# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
+"""Application factory."""
+
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from service import __version__
+from service.api import health
+from service.api.middleware import (
+    BodySizeLimitMiddleware,
+    RequestContextMiddleware,
+    SecurityHeadersMiddleware,
+)
+from service.config import Settings, get_settings
+from service.db import Database, migrate
+from service.errors import install_error_handlers
+from service.observability import configure_logging, get_logger
+
+log = get_logger("app")
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        configure_logging(settings.log_level, json_output=settings.log_json)
+        if settings.db_auto_migrate:
+            await migrate(settings.database_url)
+        app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
+        log.info("startup complete", extra={"environment": settings.environment})
+        try:
+            yield
+        finally:
+            await app.state.db.dispose()
+
+    app = FastAPI(
+        title="URL Shortener",
+        version=__version__,
+        lifespan=lifespan,
+        openapi_url="/api/v1/openapi.json",
+    )
+    app.state.settings = settings
+    install_error_handlers(app)
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_headers=["Content-Type", "Idempotency-Key", "X-Request-ID"],
+        )
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
+    app.add_middleware(RequestContextMiddleware)
+
+    app.include_router(health.router)
+    return app

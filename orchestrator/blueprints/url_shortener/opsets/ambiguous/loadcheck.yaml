@@ -1,0 +1,7 @@
+summary: Load-sanity script measuring redirect p50/p95/p99 against a real uvicorn process
+rationale: Turns "faster" into a measurable, repeatable number. Links are seeded through the service layer,
+  the server runs as a separate process, and each concurrent worker owns its own HTTP connection so the
+  measurement is not dominated by client-side connection-pool contention.
+alternatives:
+- 'In-process ASGI client: rejected, hides network and server overhead'
+ops: []

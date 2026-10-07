@@ -1,0 +1,7 @@
+summary: Token-bucket rate limiter (in-memory, Redis via atomic Lua) with 429 + Retry-After
+rationale: Token buckets allow short bursts while bounding sustained rate. The Redis variant runs the
+  read-modify-write in a Lua script so concurrent replicas cannot double-spend tokens.
+alternatives:
+- 'Fixed-window INCR/EXPIRE: rejected, allows 2x bursts at window edges'
+- 'Sliding log: rejected, O(requests) memory per key'
+ops: []
