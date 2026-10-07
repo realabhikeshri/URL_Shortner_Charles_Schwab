@@ -28,7 +28,7 @@ from orchestrator.state import StateStore
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Agentic SDLC orchestrator")
 audit_app = typer.Typer(no_args_is_help=True, help="Audit log commands")
 app.add_typer(audit_app, name="audit")
-console = Console()
+console = Console(width=None if sys.stdout.isatty() else 120)  # wide enough when piped (CI, logs)
 
 RUNS = Path("runs")
 WORK = Path(".work")
@@ -252,16 +252,27 @@ def demo(
         if state is not RunState.SUCCEEDED:
             break
     table = Table(title=f"Demo summary ({time.monotonic() - started:.0f}s)")
-    for col in ("scenario", "run", "state", "nodes ok", "retries", "rollbacks", "approvals (auto)",
-                "replans", "policy blocks", "e2e s", "audit chain"):  # fmt: skip
-        table.add_column(col)
+    for col in (
+        "scenario",
+        "state",
+        "nodes",
+        "retry",
+        "rollbk",
+        "appr(auto)",
+        "replan",
+        "blocks",
+        "s",
+        "audit",
+    ):
+        table.add_column(col, no_wrap=True)
     for name, run_dir, state, m in rows:
         table.add_row(
-            name, run_dir.name, state.value, f"{m['nodes']['SUCCEEDED']}/{m['nodes_total']}",
-            str(m["retries"]), str(m["rollbacks"]), f"{m['approvals']} ({m['approvals_auto']})",
-            str(m["replans"]), str(m["policy_violations"]["block"]), str(m["end_to_end_latency_s"]),
-            "intact" if m["audit_chain_ok"] else "BROKEN",
+            name, state.value, f"{m['nodes']['SUCCEEDED']}/{m['nodes_total']}", str(m["retries"]),
+            str(m["rollbacks"]), f"{m['approvals']}({m['approvals_auto']})", str(m["replans"]),
+            str(m["policy_violations"]["block"]), f"{m['end_to_end_latency_s']:.0f}",
+            "ok" if m["audit_chain_ok"] else "BROKEN",
         )  # fmt: skip
+        console.print(f"  {name}: {run_dir}")
     console.print(table)
     ok = all(state is RunState.SUCCEEDED for _, _, state, _ in rows) and len(rows) == 3
     if ok:

@@ -134,3 +134,71 @@ metrics exported to `runs/metrics.json` and `runs/metrics.prom` via `orchestrato
 answered open question did not reduce ambiguity. Analyst rules fixed (narrower pattern, keep the previous title,
 credit per resolved question); the ambiguous run was re-executed with the same human approvals and replaces the
 earlier evidence. `make demo` reproduces the committed service byte-for-byte.
+
+## Phase 9 — Docs, Docker, clean-clone verification
+
+**Docker (real run, Docker Desktop 29.6.2).** `docker compose up --build -d` built the image (352 MB, multi-stage,
+non-root) and started Postgres 16 + Redis 7 + service, all healthy. `bash scripts/smoke.sh` output:
+
+```text
+readyz:   {"status":"ready","checks":{"database":"ok","cache:redis":"ok"}}
+create:   {"code":"smoke-test","short_url":"http://localhost:8000/smoke-test","target_url":"https://example.com/smoke","is_custom":true,"tags":[],"disabled":false,"created_at":"2026-10-07T07:13:04.565568Z","updated_at":"2026-10-07T07:13:04.565571Z","expires_at":null,"is_expired":false}
+redirect: 302 -> https://example.com/smoke
+redirect: 302 -> https://example.com/smoke
+redirect: 302 -> https://example.com/smoke
+stats:    {"code":"smoke-test","window_days":30,"total_clicks":3,"unique_visitors":3,"clicks_by_day":[{"day":"2026-10-07","clicks":3,"unique_visitors":3}],"top_referrers":[{"host":"ref.example","clicks":3}],"top_user_agents":[{"family":"other","clicks":3}]}
+metrics:  redirects_total{outcome="ok"} 3.0
+```
+
+Inside Postgres afterwards: `alembic_version = 0003`, `count(clicks) = 3`. Note `/Smoke-Test` (mixed case) resolved
+the lower-case alias: the brownfield fix working on Postgres. Stack torn down with `docker compose down -v`.
+(First `compose up` attempt appeared hung while the base images were pulling; it completed once re-run in the
+background. No code change was needed.)
+
+**Docs.** Added TESTING, RISKS, SECURITY, ASSUMPTIONS, LIMITATIONS, OPERATIONS, ENGINEERING_SUMMARY, CHANGELOG,
+PERFORMANCE, README, ARCHITECTURE, DECISIONS (17 ADRs), SCENARIOS. Numbers come from `pytest --cov` (285 tests;
+service 97%, orchestrator 91%), the committed runs' `state.db`, and `make loadcheck` (p95 6.08 ms, 3,338 req/s).
+`scripts/verify_mapping.py` (`make verify-mapping`, also in CI) checks that every file, test and symbol named in
+ENGINEERING_SUMMARY exists: 161 references; it caught a wrong reference on its first run (fixed).
+
+**Clean clone** (`git clone . /tmp/verify`, `ANTHROPIC_API_KEY` unset): `make setup` OK; `make check` ALL GREEN
+(285 passed in 63 s, both coverage gates, bandit, pip-audit); `make demo` exit 0; `make verify-lineage` and
+`make verify-mapping` OK. The demo summary table printed truncated cells when stdout was not a TTY (80 columns),
+so the CLI now renders at 120 columns when piped and with compact headers. Final table:
+
+```text
+                                      Demo summary (38s)                                       
+┏━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┳━━━━┳━━━━━━━┓
+┃ scenario   ┃ state     ┃ nodes ┃ retry ┃ rollbk ┃ appr(auto) ┃ replan ┃ blocks ┃ s  ┃ audit ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━╇━━━━╇━━━━━━━┩
+│ greenfield │ SUCCEEDED │ 14/14 │ 0     │ 0      │ 2(2)       │ 0      │ 0      │ 12 │ ok    │
+│ brownfield │ SUCCEEDED │ 14/14 │ 1     │ 1      │ 2(2)       │ 0      │ 0      │ 12 │ ok    │
+│ ambiguous  │ SUCCEEDED │ 17/17 │ 0     │ 0      │ 6(6)       │ 1      │ 0      │ 15 │ ok    │
+└────────────┴───────────┴───────┴───────┴────────┴────────────┴────────┴────────┴────┴───────┘
+committed service/ matches orchestrator output: yes
+```
+
+## Phase 10 — Self-review
+
+1. **Clean clone**: done above (setup, check, demo with no key).
+2. **docker compose**: done above; create -> redirect -> stats recorded.
+3. **Markers** (`grep -rnE 'TODO|FIXME|NotImplementedError|pass  # '`): only hit is `orchestrator/agents/governance.py`,
+   where `TODO|FIXME|XXX|HACK` is the *pattern the Reviewer searches for* in generated code: legitimate.
+4. **Requirement mapping**: `make verify-mapping` -> 161 references, 0 problems.
+5. **Self-score** (1-10, honest):
+
+| Criterion | Score | Why / what is weak |
+|---|---|---|
+| Effectiveness of agentic orchestration | 8 | Full governed loop proven end-to-end with real gates; **but** the "agents" default to a deterministic provider, so the intelligence is curated, and the Anthropic path was never run live |
+| Architecture quality | 8 | Clean separation, persisted state machine, explicit transition table, typed contracts; engine.py is large (1.1k lines) and would benefit from splitting (scheduler / approvals / re-plan) |
+| Depth of decomposition | 8 | Real DAGs of 14-17 nodes with disjoint write sets, parallel branches, joins, re-plan deltas; node granularity is catalog-driven rather than learned |
+| Realism of outputs | 8 | Service is genuinely good (97% cov, mypy strict, Postgres+Redis verified, p95 measured); some outputs (docs text, design rationale) are templated |
+| Validation / risk rigor | 9 | Independent gates, evidence-based reviewer, tamper-evident audit, risk register, fault injection, kill-and-resume test; CI workflow never executed |
+| Clarity / defensibility of decisions | 9 | 17 ADRs with alternatives, honest LIMITATIONS, BUILD_LOG records what broke |
+| Core engineering principles | 8 | Fail-closed policies, least privilege, idempotency, bounded resources, graceful degradation; shared-workspace isolation is the main compromise (ADR-015) |
+| Judgment | 8 | Fixed generators not outputs (ADR-014), refused to relax the p95 target when the tool was at fault, separated scripted from organic behaviour in the docs |
+
+**Weakest areas and what was done:** (a) unrun CI and live-Claude path: cannot be fixed without a remote/API key, documented in
+LIMITATIONS 2 and 11; (b) scripted self-repair/mid-run change: documented in ADR-012 and ASSUMPTIONS 15-16;
+(c) unauthenticated approver identity: documented (LIMITATIONS 4); (d) fallback/safe-stop paths are not exercised
+in the committed runs (covered by tests, listed in the mapping table).
