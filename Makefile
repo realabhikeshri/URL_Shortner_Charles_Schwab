@@ -20,9 +20,13 @@ SERVICE_COV_MIN := 85
 ORCH_COV_MIN := 80
 APPROVE := --auto-approve=low,medium
 
-.PHONY: help setup lint format typecheck test test-fast security check run demo \
+requirements-service: ## Re-pin the Docker image's service-only dependencies to uv.lock
+	$(UV) export --frozen --no-dev --no-hashes --no-emit-project > .work/lock-constraints.txt
+	$(UV) pip compile requirements.service.in -c .work/lock-constraints.txt --python-version 3.12 --python-platform linux --no-header --no-annotate -o requirements.service.txt
+
+.PHONY: requirements-service help setup lint format typecheck test test-fast security check run demo \
         scenario-greenfield scenario-brownfield scenario-ambiguous sync-service verify-lineage \
-        loadcheck openapi docker-up docker-down clean
+        loadcheck verify-mapping openapi docker-up docker-down clean
 
 help: ## Show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}'
@@ -77,6 +81,9 @@ sync-service: ## Copy the orchestrator-produced service from the last demo works
 
 verify-lineage: ## Prove committed service/ is byte-identical to what the orchestrator produces
 	$(RUN) orchestrator verify-lineage --workspace .work/demo
+
+verify-mapping: ## Check every file/test named in docs/ENGINEERING_SUMMARY.md exists
+	$(PY) scripts/verify_mapping.py
 
 loadcheck: ## Measure p50/p95 redirect latency and update docs/PERFORMANCE.md
 	$(PY) scripts/loadcheck.py --requests 2000 --concurrency 20 --write docs/PERFORMANCE.md

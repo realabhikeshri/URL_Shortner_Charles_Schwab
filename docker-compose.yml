@@ -1,0 +1,42 @@
+# Local production-like stack: service + Postgres + Redis.
+#   docker compose up --build -d && bash scripts/smoke.sh http://localhost:8000
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shortener
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shortener-local-only}
+      POSTGRES_DB: shortener
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener -d shortener"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  service:
+    build: .
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      SHORTENER_DATABASE_URL: postgresql+asyncpg://shortener:${POSTGRES_PASSWORD:-shortener-local-only}@postgres:5432/shortener
+      SHORTENER_REDIS_URL: redis://redis:6379/0
+      SHORTENER_BASE_URL: http://localhost:8000
+      SHORTENER_ANALYTICS_SALT_SECRET: ${SHORTENER_ANALYTICS_SALT_SECRET:-change-me-in-real-deployments}
+      SHORTENER_LOG_JSON: "true"
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

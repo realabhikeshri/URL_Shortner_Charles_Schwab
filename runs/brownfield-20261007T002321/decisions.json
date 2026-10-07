@@ -1,0 +1,236 @@
+[
+  {
+    "decision_id": "D-45ad2e0471",
+    "node_id": "requirement",
+    "agent": "human",
+    "inputs_hash": "046842419e29fada63603c73c2b1fc75db525e8fba8a604ba8a6890852c0d736",
+    "rationale": "Requirement of record: brownfield.yaml",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:21.454119Z",
+    "parent_decision_ids": [],
+    "outcome": "accepted for processing"
+  },
+  {
+    "decision_id": "D-d00ef83eca",
+    "node_id": "intake",
+    "agent": "RequirementAnalyst",
+    "inputs_hash": "773dc83f03e2da65563571815ba0881ecb0982db1fa97c43df9af1348ed908a8",
+    "rationale": "Capabilities ['schema_v2', 'alias_case_fix', 'expiry', 'analytics']. Ambiguities: none. Assumptions: 0.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:21.523515Z",
+    "parent_decision_ids": [
+      "D-45ad2e0471"
+    ],
+    "outcome": "REQ-BF-002: 4 functional reqs, 6 acceptance criteria, ambiguity 0.0, risk medium"
+  },
+  {
+    "decision_id": "D-dfcb4eecce",
+    "node_id": "analysis.impact",
+    "agent": "CodebaseAnalyst",
+    "inputs_hash": "b411d5a47ab7dd11d21fbdaf62f8fdcdee5b973651b76ad72366918084846e02",
+    "rationale": "Seeds ['service.api.links', 'service.api.redirect', 'service.domain.codes', 'service.models', 'service.repository'] -> 10 impacted modules via the reverse import graph; routes from fastapi; migrations_needed=True; blast radius 0.684.",
+    "alternatives_considered": [
+      "grep-based impact estimate (cheaper, misses transitive importers)"
+    ],
+    "timestamp": "2026-10-07T00:23:21.834528Z",
+    "parent_decision_ids": [
+      "D-d00ef83eca"
+    ],
+    "outcome": "10 of 23 modules impacted, 7 routes, blast radius 0.68."
+  },
+  {
+    "decision_id": "D-d29fcbbc81",
+    "node_id": "plan",
+    "agent": "Planner",
+    "inputs_hash": "4e2d2bef303262a12d1a3ffceed3db64e7f42196366f85dbc6e246850b659cf6",
+    "rationale": "Capabilities ['schema_v2', 'alias_case_fix', 'expiry', 'analytics'] decomposed from the catalog. Independent work runs in parallel (implement.migration_0002, test.regression_alias); tests and docs branch after implementation and join at review; release waits for review.",
+    "alternatives_considered": [
+      "Single sequential pipeline: simpler, but slower and one failure stalls everything",
+      "One mega implement node: fewer gates, far larger blast radius per failure"
+    ],
+    "timestamp": "2026-10-07T00:23:21.846495Z",
+    "parent_decision_ids": [
+      "D-dfcb4eecce"
+    ],
+    "outcome": "plan with 11 nodes, risk medium"
+  },
+  {
+    "decision_id": "D-a5f63b6dd7",
+    "node_id": "design.analytics",
+    "agent": "Architect",
+    "inputs_hash": "d4c7bf8f282c9320ac13272c7c4d10180e2ca0d1ef149d20a80139c81f87c38b",
+    "rationale": "Exact match first, then lower-cased match restricted to is_custom rows: keeps generated base62 codes case-sensitive while making aliases case-insensitive; Expiry evaluated at read time: no background job needed; exact to the request; In-process bounded queue + batch writer: keeps DB writes off the redirect path; drops (and counts) on overflow instead of adding latency; visitor = sha256(HMAC(secret, day) + ip + ua): unique visitors per day without storing PII; salts rotate daily so hashes cannot be joined across days; Retention purge on a timer (analytics_retention_days): compliance policy CMP-003",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:21.870469Z",
+    "parent_decision_ids": [
+      "D-d29fcbbc81"
+    ],
+    "outcome": "design with 5 components, 5 decisions"
+  },
+  {
+    "decision_id": "D-503eef95a1",
+    "node_id": "implement.migration_0002",
+    "agent": "Implementer",
+    "inputs_hash": "b4eb6f1d80d4eba037bf888714269677c49f61477f8ab658bf29ec36ac509a19",
+    "rationale": "Additive and reversible: a nullable column and a new table with a composite (link_id, day) index for the stats queries. SQLite needs batch mode for ALTER, Postgres does not; env.py selects it. The clicks table has no IP or user-agent column by design.",
+    "alternatives_considered": [
+      "Store raw IP/UA and aggregate later: rejected, violates data minimisation (CMP policy)",
+      "Separate analytics database: deferred, documented as the scaling path"
+    ],
+    "timestamp": "2026-10-07T00:23:21.945192Z",
+    "parent_decision_ids": [
+      "D-a5f63b6dd7"
+    ],
+    "outcome": "Migration 0002 - links.expires_at and the clicks table, plus models"
+  },
+  {
+    "decision_id": "D-8e3acea809",
+    "node_id": "test.regression_alias",
+    "agent": "TestEngineer",
+    "inputs_hash": "4f59d2781f634b6361fee8f43a0f9ce883fea0e8e8ed550d8cbddcf992c37a81",
+    "rationale": "Test-first bug fix. Creates an alias as 'MyLink' and asserts it resolves at /MyLink, /mylink and /MYLINK and via the metadata endpoint. The tests_fail_first gate proves it reproduces the bug (fails with an assertion, not an error) before any production code changes.",
+    "alternatives_considered": [
+      "Fix first and test after: rejected, would not prove the test detects the bug"
+    ],
+    "timestamp": "2026-10-07T00:23:21.963464Z",
+    "parent_decision_ids": [
+      "D-a5f63b6dd7"
+    ],
+    "outcome": "Regression test reproducing the alias case bug (red before the fix)"
+  },
+  {
+    "decision_id": "D-effa43b000",
+    "node_id": "implement.alias_fix",
+    "agent": "Implementer",
+    "inputs_hash": "942bd9f80352c35e35e5b73ef82fb653476a1512aafd2787b6bf2d9ac9560800",
+    "rationale": "Aliases are stored lower case, so normalising the requested code to lower case makes alias lookups case-insensitive.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:22.714848Z",
+    "parent_decision_ids": [
+      "D-8e3acea809"
+    ],
+    "outcome": "Lower-case every code on lookup (first attempt)"
+  },
+  {
+    "decision_id": "D-38fdc50025",
+    "node_id": "implement.alias_fix",
+    "agent": "Implementer",
+    "inputs_hash": "a9bf75a870de263e643fa26fbf63eee7450aa6a407ca6848a27dd0ee6a169f79",
+    "rationale": "Exact match first keeps generated base62 codes case-sensitive; only when that misses and the requested code is not already lower case do we look up the canonical alias, restricted to is_custom rows. Aliases are already stored lower-cased, so no data migration is needed.",
+    "alternatives_considered": [
+      "Lower-case every lookup: rejected, breaks generated codes (62 -> 36 symbol space and wrong links)",
+      "Add a code_lower column: rejected, unnecessary schema change"
+    ],
+    "timestamp": "2026-10-07T00:23:23.714097Z",
+    "parent_decision_ids": [
+      "D-8e3acea809"
+    ],
+    "outcome": "Alias lookup falls back to the canonical lower-case alias (custom links only) (self-repair: retry feedback shows 'test_generated_codes_are_case_sensitive' failing)"
+  },
+  {
+    "decision_id": "D-41d730bf66",
+    "node_id": "implement.expiry",
+    "agent": "Implementer",
+    "inputs_hash": "ef2270f0f1e44c64eee5a6067cdff1fe6bdde157ef401269c5cf3798d9aba4fd",
+    "rationale": "Expiry is evaluated at read time against UTC now, so no scheduler is required and behaviour is exact. expires_at must be timezone-aware and in the future; PATCH with null clears it.",
+    "alternatives_considered": [
+      "Background job flipping a flag: rejected, adds moving parts and a lag window"
+    ],
+    "timestamp": "2026-10-07T00:23:25.069849Z",
+    "parent_decision_ids": [
+      "D-503eef95a1"
+    ],
+    "outcome": "Optional expires_at on create/PATCH; expired links return 410; metadata reports is_expired"
+  },
+  {
+    "decision_id": "D-4e2d243e46",
+    "node_id": "implement.analytics",
+    "agent": "Implementer",
+    "inputs_hash": "778d2880279222b200e9bbfd37add13aa3e12b3ecdc55dd4ed61918a9b2096ba",
+    "rationale": "The redirect only enqueues (put_nowait) and never awaits analytics I/O; a background writer batches inserts and a purger enforces analytics_retention_days. Unique visitors use a daily-salted HMAC so no PII is stored and hashes cannot be correlated across days. Failures are counted and logged without PII and never propagate to the redirect.",
+    "alternatives_considered": [
+      "FastAPI BackgroundTasks per request: rejected, no batching or back-pressure, one insert per click",
+      "External queue (Kafka/SQS): deferred, documented scaling path"
+    ],
+    "timestamp": "2026-10-07T00:23:25.891696Z",
+    "parent_decision_ids": [
+      "D-41d730bf66",
+      "D-503eef95a1"
+    ],
+    "outcome": "Click analytics off the hot path (bounded queue + batch writer), stats endpoint, retention purge"
+  },
+  {
+    "decision_id": "D-c101f0be8a",
+    "node_id": "test.analytics",
+    "agent": "TestEngineer",
+    "inputs_hash": "d79d019e6929aef4498441f8b2014cf57afda2e522a1e0633ba09c05c5f9f775",
+    "rationale": "Uses per-request client addresses through the ASGI transport to simulate distinct visitors and proves that both enqueue failures and database failures leave redirects unaffected.",
+    "alternatives_considered": [
+      "Unit-test the SQL only: rejected, the contract is the HTTP response"
+    ],
+    "timestamp": "2026-10-07T00:23:26.673679Z",
+    "parent_decision_ids": [
+      "D-4e2d243e46"
+    ],
+    "outcome": "Stats API tests (distinct visitors, referrers, UA families, window validation) and failure isolation"
+  },
+  {
+    "decision_id": "D-e61e73056d",
+    "node_id": "document.analytics",
+    "agent": "DocWriter",
+    "inputs_hash": "a8d2fd9d822999548296f138a6d2966d6159f8a16a7e96d8c29140dbc74e2514",
+    "rationale": "API reference and OpenAPI are generated from the running app, so they cannot drift from the code.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:27.018784Z",
+    "parent_decision_ids": [
+      "D-38fdc50025",
+      "D-4e2d243e46"
+    ],
+    "outcome": "docs for 8 routes; 4 changelog entries"
+  },
+  {
+    "decision_id": "D-6ef176a836",
+    "node_id": "test.coverage",
+    "agent": "TestEngineer",
+    "inputs_hash": "e890c4416a5582ecbb4d8c616d245b434e41f627390e5134d3ec08a19e4db32d",
+    "rationale": "Coverage is measured by the independent coverage gate, not self-reported.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:27.941384Z",
+    "parent_decision_ids": [
+      "D-38fdc50025",
+      "D-4e2d243e46",
+      "D-c101f0be8a",
+      "D-8e3acea809"
+    ],
+    "outcome": "108 tests collected across 11 modules"
+  },
+  {
+    "decision_id": "D-72bac2d19c",
+    "node_id": "review.code",
+    "agent": "Reviewer",
+    "inputs_hash": "cf9c610e1adf5c1c726c90e81a5e8b1ea41b4da9ed0b3cd2408201a4a25bbf84",
+    "rationale": "6/6 acceptance criteria verified by passing tests; 20 files changed.",
+    "alternatives_considered": [
+      "Approve on LLM judgement alone (rejected: approvals require test evidence)"
+    ],
+    "timestamp": "2026-10-07T00:23:32.881774Z",
+    "parent_decision_ids": [
+      "D-e61e73056d",
+      "D-6ef176a836"
+    ],
+    "outcome": "review approve: 6/6 acceptance criteria verified by passing tests; 20 files changed."
+  },
+  {
+    "decision_id": "D-e61d77782e",
+    "node_id": "release.readiness",
+    "agent": "ReleaseManager",
+    "inputs_hash": "ce04df71c4dc657bae65b857ea83a70b80cc75fbd1e9ebd3bf79091c9be2a66b",
+    "rationale": "REQ-BF-002: Add click analytics (stats endpoint with daily breakdown, referrers, unique visitors) and link expiry, and fix the bug where custom aliases are case-sensitive in lookups but not in creation.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:33.567409Z",
+    "parent_decision_ids": [
+      "D-72bac2d19c"
+    ],
+    "outcome": "release READY: 5/5"
+  }
+]

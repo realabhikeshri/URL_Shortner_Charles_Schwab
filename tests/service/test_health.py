@@ -129,3 +129,14 @@ def test_json_formatter_includes_request_id_and_extras() -> None:
 
 def test_settings_strip_trailing_slash() -> None:
     assert Settings(base_url="https://s.io/").base_url == "https://s.io"
+
+
+def test_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SHORTENER_REDIRECT_STATUS_CODE", "307")
+    monkeypatch.setenv("SHORTENER_CORS_ORIGINS", '["https://app.example.com"]')
+    settings = Settings()
+    assert settings.redirect_status_code == 307
+    assert settings.cors_origins == ["https://app.example.com"]
+    monkeypatch.setenv("SHORTENER_REDIRECT_STATUS_CODE", "301")
+    with pytest.raises(ValueError, match="302 or 307"):
+        Settings()

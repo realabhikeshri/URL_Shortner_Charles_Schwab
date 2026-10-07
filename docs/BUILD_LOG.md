@@ -26,7 +26,7 @@ verifier), `tracing` (OTel-shaped spans), `context` (versioned, content-hashed a
 `metrics` (per-run and cross-run, JSON + Prometheus), `engine` (asyncio scheduler with concurrency limit,
 gates, retries with backoff+jitter and feedback, path-scoped git rollback, approvals, safe-stop, budgets,
 plan expansion, dynamic re-planning, resume). Controls: `controls`, `approvals` (autonomy policy),
-`workspace` (sandbox + git checkpoints), `gates`, `policy/` (engine + 13 checks) and `policies/*.yaml`.
+`workspace` (sandbox + git checkpoints), `gates`, `policy/` (engine + 12 checks) and `policies/*.yaml`.
 
 Phases 2 and 3 were built in one pass because the engine integrates retries/rollback/approvals directly;
 `make check` was run green at the combined boundary and they are committed together.

@@ -1,0 +1,2320 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 4ca1ce8..2e3f668 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,11 @@ All notable changes to this service are documented here (format: Keep a Changelo
+ - GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families. (REQ-BF-002)
+ - Clicks are recorded off the redirect hot path; analytics failures never fail a redirect. (REQ-BF-002)
+ - Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect. (REQ-BF-002)
++- Read-through redirect cache (REQ-AMBIGUOUS)
++- Token-bucket rate limiting (REQ-AMBIGUOUS)
++- Prometheus metrics (REQ-AMBIGUOUS)
++- Redirect latency target (REQ-AMBIGUOUS)
++- API-key authentication on write endpoints (REQ-AMBIGUOUS)
+ 
+ ### Fixed
+ - Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive. (REQ-BF-002)
+diff --git a/README.md b/README.md
+index c35e3a1..224eba5 100644
+--- a/README.md
++++ b/README.md
+@@ -13,7 +13,8 @@ uvicorn service.app:create_app --factory --port 8000
+ | Method | Path | Summary |
+ |---|---|---|
+ | GET | `/healthz` | Liveness probe |
+-| GET | `/readyz` | Readiness probe (database reachable) |
++| GET | `/readyz` | Readiness probe (database and cache reachable) |
++| GET | `/metrics` | metrics endpoint |
+ | POST | `/api/v1/links` | create link |
+ | GET | `/api/v1/links/{code}` | get link |
+ | PATCH | `/api/v1/links/{code}` | update link |
+@@ -35,7 +36,12 @@ All settings are environment variables with the `SHORTENER_` prefix:
+ - `SHORTENER_ANALYTICS_RETENTION_DAYS`
+ - `SHORTENER_ANALYTICS_SALT_SECRET`
+ - `SHORTENER_APP_NAME`
++- `SHORTENER_AUTH_ENABLED`
+ - `SHORTENER_BASE_URL`
++- `SHORTENER_CACHE_ENABLED`
++- `SHORTENER_CACHE_MAX_ENTRIES`
++- `SHORTENER_CACHE_NEGATIVE_TTL_S`
++- `SHORTENER_CACHE_TTL_S`
+ - `SHORTENER_CODE_LENGTH`
+ - `SHORTENER_CODE_MAX_ATTEMPTS`
+ - `SHORTENER_CORS_ORIGINS`
+@@ -48,13 +54,21 @@ All settings are environment variables with the `SHORTENER_` prefix:
+ - `SHORTENER_LOG_LEVEL`
+ - `SHORTENER_MAX_REQUEST_BODY_BYTES`
+ - `SHORTENER_MAX_URL_LENGTH`
++- `SHORTENER_METRICS_ENABLED`
++- `SHORTENER_RATE_LIMIT_ENABLED`
++- `SHORTENER_RATE_LIMIT_REDIRECT_CAPACITY`
++- `SHORTENER_RATE_LIMIT_REDIRECT_REFILL_PER_S`
++- `SHORTENER_RATE_LIMIT_WRITE_CAPACITY`
++- `SHORTENER_RATE_LIMIT_WRITE_REFILL_PER_S`
+ - `SHORTENER_REDIRECT_STATUS_CODE`
++- `SHORTENER_REDIS_URL`
+ 
+ ## Requirements implemented
+ 
+-Latest change: **REQ-BF-002 - Click analytics, link expiry and alias case bug fix**
++Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster**
+ 
+-- GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families.
+-- Clicks are recorded off the redirect hot path; analytics failures never fail a redirect.
+-- Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect.
+-- Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive.
++- Read-through redirect cache
++- Token-bucket rate limiting
++- Prometheus metrics
++- Redirect latency target
++- API-key authentication on write endpoints
+diff --git a/docs/PERFORMANCE.md b/docs/PERFORMANCE.md
+new file mode 100644
+index 0000000..64f49aa
+--- /dev/null
++++ b/docs/PERFORMANCE.md
+@@ -0,0 +1,9 @@
++# Performance
++
++<!-- loadcheck:start -->
++Measured 2026-10-07T00:23:50+00:00 on Darwin arm64, Python 3.12.15, sqlite (aiosqlite), single uvicorn worker.
++
++| Requests | Concurrency | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | req/s | errors | target p95 |
++|---|---|---|---|---|---|---|---|---|
++| 600 | 20 | 5.26 | 6.42 | 7.65 | 5.39 | 2802.7 | 0 | 50.0 ms ✅ |
++<!-- loadcheck:end -->
+diff --git a/docs/design/enterprise.md b/docs/design/enterprise.md
+new file mode 100644
+index 0000000..dd89f4b
+--- /dev/null
++++ b/docs/design/enterprise.md
+@@ -0,0 +1,55 @@
++# Design - Make the shortener enterprise-ready and faster
++
++Requirement: **REQ-AMBIGUOUS** (v2, risk high)
++
++## Summary
++
++Make the shortener enterprise-ready and faster. Update from security review: enterprise-ready requires API-key authentication on all write endpoints (create, update, delete). Keys must be stored hashed and only the owning key may modify or delete a link. Impact analysis: 5 of 26 modules impacted, 2 routes, blast radius 0.18.
++
++## Components
++
++- service.cache - Cache protocol, bounded in-memory TTL LRU, Redis backend
++- service.ratelimit - token bucket (in-memory, Redis Lua for atomicity)
++- service.metrics - per-app registry, request/redirect/cache/rate-limit/analytics metrics, /metrics
++- scripts/loadcheck.py - starts uvicorn, seeds links, measures p50/p95 redirect latency
++- service.auth - key generation (usk_<prefix>_<secret>), SHA-256 at rest, constant-time verify, require_api_key dependency
++- service.cli - create/revoke keys
++
++## Decisions
++
++| Decision | Rationale / rejected alternative |
++|---|---|
++| Read-through cache of the resolved link (positive + short negative TTL) | removes the DB from the hot path; negative caching blunts enumeration |
++| Invalidate on PATCH/DELETE | correctness over hit rate for state changes |
++| Per API key for writes, per client IP for redirects | fairness for authenticated clients, abuse protection for public traffic |
++| 429 with Retry-After and X-RateLimit-* headers | standard, client-friendly back-off signal |
++| Per-app CollectorRegistry | isolated in tests, no global state |
++| p95 < 50 ms @ 20 concurrent clients (laptop, SQLite) enforced as a gate | a concrete, repeatable number replaces 'faster' |
++| Opaque random keys hashed with SHA-256 (keys have 256 bits of entropy, so a slow KDF adds nothing) | fast verification on every write without storing secrets |
++| Owner-only PATCH/DELETE | prevents one tenant modifying another tenant's links |
++
++## Data model
++
++- `cache key link:{code} -> {target, gone, expires_at}`
++- `bucket state {tokens, updated_at} per key`
++- `api_keys(id, name, prefix UNIQUE, key_hash, created_at, revoked_at); links.owner_key_id FK NULL`
++
++## Risks and assumptions
++
++- [enterprise-ready] Interpret as read-through caching of redirects, per-client rate limiting and Prometheus metrics. Authentication changes the public API contract, so it is NOT assumed; it is raised as open question Q-1.
++- [faster] Target the redirect hot path - p95 latency under 50 ms with 20 concurrent clients on a developer laptop (SQLite), measured by scripts/loadcheck.py and enforced as a gate.
++
++## Acceptance criteria
++
++- **AC-C1** Given a link that was resolved once, when it is followed again, then the redirect is served from cache without a database lookup.
++- **AC-C2** Given a cached link, when it is disabled or deleted, then the next redirect reflects the change.
++- **AC-R1** Given a client over its rate limit, when it sends another request, then the API returns 429 with Retry-After.
++- **AC-O1** Given traffic has been served, when Prometheus scrapes /metrics, then request, redirect and cache metrics are exposed.
++- **AC-P1** Given 20 concurrent clients, when they follow links, then p95 redirect latency is under 50 ms.
++- **AC-A1** Given no or an invalid X-API-Key, when a client calls a write endpoint, then the API returns 401.
++- **AC-A2** Given a link created by key A, when key B tries to modify or delete it, then the API returns 403.
++- **AC-A3** Given an API key, when it is stored, then only its SHA-256 hash is persisted.
++
++## Open questions
++
++- Q-2: Is there a production SLO (p95/p99, RPS) that should replace the laptop target?
+diff --git a/docs/service/API.md b/docs/service/API.md
+index 56786c1..5f782f2 100644
+--- a/docs/service/API.md
++++ b/docs/service/API.md
+@@ -65,7 +65,7 @@ Responses: `200`
+ 
+ ## `GET /readyz`
+ 
+-Readiness probe (database reachable)
++Readiness probe (database and cache reachable)
+ 
+ Responses: `200`
+ 
+@@ -77,4 +77,4 @@ Follow
+ |---|---|---|
+ | `code` | path | True |
+ 
+-Responses: `302`, `404`, `410`, `422`
++Responses: `302`, `404`, `410`, `422`, `429`
+diff --git a/pyproject.toml b/pyproject.toml
+index 380a122..cfde9eb 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -11,6 +11,8 @@ dependencies = [
+     "aiosqlite>=0.20",
+     "asyncpg>=0.29",
+     "alembic>=1.13",
++    "redis>=5.0",
++    "prometheus-client>=0.20",
+ ]
+ 
+ [tool.ruff]
+diff --git a/scripts/loadcheck.py b/scripts/loadcheck.py
+new file mode 100644
+index 0000000..d1e0a50
+--- /dev/null
++++ b/scripts/loadcheck.py
+@@ -0,0 +1,202 @@
++# lineage: REQ-AMBIGUOUS / implement.loadcheck (see runs/ for the decision trail)
++"""Load-sanity check for the redirect hot path.
++
++Starts a real uvicorn process on a temporary SQLite database, seeds links directly through the
++service layer, warms up, then fires ``--requests`` redirects with ``--concurrency`` concurrent
++clients over HTTP and reports p50/p95/p99 latency. Rate limiting is disabled for the run because
++all load comes from one client address (the limiter is exercised by its own tests).
++
++    python scripts/loadcheck.py --requests 2000 --concurrency 20 --write docs/PERFORMANCE.md
++"""
++
++import argparse
++import asyncio
++import json
++import os
++import platform
++import random
++import socket
++import statistics
++import sys
++import tempfile
++import time
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import Any
++
++import httpx
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++
++from service.config import Settings  # noqa: E402
++from service.db import Database, migrate  # noqa: E402
++from service.links import LinkService  # noqa: E402
++from service.schemas import LinkCreate  # noqa: E402
++
++BLOCK_START, BLOCK_END = "<!-- loadcheck:start -->", "<!-- loadcheck:end -->"
++
++
++def free_port() -> int:
++    with socket.socket() as s:
++        s.bind(("127.0.0.1", 0))
++        return int(s.getsockname()[1])
++
++
++async def seed(database_url: str, n: int) -> list[str]:
++    settings = Settings(database_url=database_url, db_auto_migrate=False)
++    db = Database(database_url)
++    codes = []
++    async with db.session() as session:
++        service = LinkService(session, settings)
++        for i in range(n):
++            link, _ = await service.create(LinkCreate(url=f"https://example.com/page/{i}"))
++            codes.append(link.code)
++    await db.dispose()
++    return codes
++
++
++def percentile(values: list[float], pct: float) -> float:
++    ordered = sorted(values)
++    k = (len(ordered) - 1) * pct / 100
++    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
++    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
++
++
++async def fire(
++    base: str, codes: list[str], total: int, concurrency: int
++) -> tuple[list[float], int]:
++    latencies: list[float] = []
++    errors = 0
++    rng = random.Random(42)
++    queue: asyncio.Queue[str] = asyncio.Queue()
++    for _ in range(total):
++        queue.put_nowait(rng.choice(codes))
++
++    async def worker(client: httpx.AsyncClient) -> None:
++        nonlocal errors
++        while not queue.empty():
++            code = queue.get_nowait()
++            started = time.perf_counter()
++            resp = await client.get(f"/{code}")
++            latencies.append((time.perf_counter() - started) * 1000)
++            if resp.status_code not in (302, 307):
++                errors += 1
++
++    # One client (one keep-alive connection) per worker: a single shared httpx pool serialises
++    # on its own lock under concurrency and would measure the load generator, not the service.
++    clients = [httpx.AsyncClient(base_url=base, timeout=10) for _ in range(concurrency)]
++    try:
++        await asyncio.gather(*(worker(c) for c in clients))
++    finally:
++        for c in clients:
++            await c.aclose()
++    return latencies, errors
++
++
++async def measure(requests: int, concurrency: int, links: int) -> dict[str, Any]:
++    with tempfile.TemporaryDirectory() as tmp:
++        url = f"sqlite+aiosqlite:///{Path(tmp) / 'load.db'}"
++        await migrate(url)
++        codes = await seed(url, links)
++        port = free_port()
++        env = {
++            **os.environ,
++            "PYTHONPATH": str(ROOT),
++            "SHORTENER_DATABASE_URL": url,
++            "SHORTENER_DB_AUTO_MIGRATE": "false",
++            "SHORTENER_RATE_LIMIT_ENABLED": "false",
++            "SHORTENER_LOG_LEVEL": "WARNING",
++        }
++        server = await asyncio.create_subprocess_exec(
++            sys.executable, "-m", "uvicorn", "service.app:create_app", "--factory",
++            "--port", str(port), "--log-level", "warning", "--no-access-log",
++            cwd=ROOT, env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
++        )  # fmt: skip
++        base = f"http://127.0.0.1:{port}"
++        try:
++            async with httpx.AsyncClient(base_url=base) as probe:
++                for _ in range(100):
++                    try:
++                        if (await probe.get("/healthz")).status_code == 200:
++                            break
++                    except httpx.TransportError:
++                        await asyncio.sleep(0.1)
++                else:
++                    raise RuntimeError("server did not become healthy")
++            await fire(base, codes, min(200, requests), concurrency)  # warm-up (cache, pools)
++            started = time.perf_counter()
++            latencies, errors = await fire(base, codes, requests, concurrency)
++            elapsed = time.perf_counter() - started
++        finally:
++            server.terminate()
++            await asyncio.wait_for(server.wait(), timeout=10)
++    return {
++        "requests": requests,
++        "concurrency": concurrency,
++        "links": links,
++        "errors": errors,
++        "p50_ms": round(statistics.median(latencies), 2),
++        "p95_ms": round(percentile(latencies, 95), 2),
++        "p99_ms": round(percentile(latencies, 99), 2),
++        "mean_ms": round(statistics.mean(latencies), 2),
++        "rps": round(requests / elapsed, 1),
++        "measured_at": datetime.now(UTC).isoformat(timespec="seconds"),
++        "python": platform.python_version(),
++        "platform": f"{platform.system()} {platform.machine()}",
++        "database": "sqlite (aiosqlite)",
++    }
++
++
++def render(data: dict[str, Any]) -> str:
++    target = data.get("target_p95_ms")
++    verdict = "" if target is None else (" ✅" if data["p95_ms"] <= target else " ❌")
++    return "\n".join(
++        [
++            f"Measured {data['measured_at']} on {data['platform']}, Python {data['python']}, "
++            f"{data['database']}, single uvicorn worker.",
++            "",
++            "| Requests | Concurrency | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) "
++            "| req/s | errors | target p95 |",
++            "|---|---|---|---|---|---|---|---|---|",
++            f"| {data['requests']} | {data['concurrency']} | {data['p50_ms']} | {data['p95_ms']} | "
++            f"{data['p99_ms']} | {data['mean_ms']} | {data['rps']} | {data['errors']} | "
++            f"{target if target is not None else '-'} ms{verdict} |",
++        ]
++    )
++
++
++def write_block(path: Path, block: str) -> None:
++    text = path.read_text(encoding="utf-8") if path.exists() else "# Performance\n"
++    body = f"{BLOCK_START}\n{block}\n{BLOCK_END}"
++    if BLOCK_START in text and BLOCK_END in text:
++        head, _, rest = text.partition(BLOCK_START)
++        text = head + body + rest.partition(BLOCK_END)[2]
++    else:
++        text = text.rstrip() + "\n\n" + body + "\n"
++    path.write_text(text, encoding="utf-8")
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
++    parser.add_argument("--requests", type=int, default=2000)
++    parser.add_argument("--concurrency", type=int, default=20)
++    parser.add_argument("--links", type=int, default=50)
++    parser.add_argument("--target-p95-ms", type=float, default=50.0)
++    parser.add_argument("--json", action="store_true", help="print one JSON line")
++    parser.add_argument("--write", type=Path, help="update the results block in a markdown file")
++    parser.add_argument("--render", help="render a JSON result as markdown and exit")
++    args = parser.parse_args()
++    if args.render:
++        print(render(json.loads(args.render)))
++        return 0
++    data = asyncio.run(measure(args.requests, args.concurrency, args.links))
++    data["target_p95_ms"] = args.target_p95_ms
++    if args.write:
++        write_block(args.write, render(data))
++    print(json.dumps(data) if args.json else render(data))
++    return 0 if data["errors"] == 0 else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/service/api/deps.py b/service/api/deps.py
+index c07f35f..6590f74 100644
+--- a/service/api/deps.py
++++ b/service/api/deps.py
+@@ -1,4 +1,5 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """FastAPI dependencies shared by the routers."""
+ 
+ from collections.abc import AsyncIterator
+@@ -7,9 +8,12 @@ from typing import Annotated
+ from fastapi import Depends, Request
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from service.auth import authenticate
+ from service.config import Settings
+ from service.db import Database
+ from service.links import LinkService
++from service.models import ApiKey
++from service.ratelimit import RateLimitedError, RateLimiter, enforce
+ 
+ 
+ def get_settings(request: Request) -> Settings:
+@@ -28,7 +32,56 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+ 
+ 
+ async def get_link_service(
++    request: Request,
+     session: Annotated[AsyncSession, Depends(get_session)],
+     settings: Annotated[Settings, Depends(get_settings)],
+ ) -> LinkService:
+-    return LinkService(session, settings)
++    state = request.app.state
++    return LinkService(
++        session,
++        settings,
++        cache=getattr(state, "cache", None),
++        metrics=getattr(state, "metrics", None),
++    )
++
++
++def client_ip(request: Request) -> str:
++    return request.client.host if request.client else "unknown"
++
++
++async def _limit(request: Request, limiter: RateLimiter | None, key: str, scope: str) -> None:
++    if limiter is None:
++        return
++    try:
++        await enforce(limiter, key)
++    except RateLimitedError:
++        metrics = getattr(request.app.state, "metrics", None)
++        if metrics is not None:
++            metrics.rate_limited.labels(scope).inc()
++        raise
++
++
++async def require_api_key(
++    request: Request, session: Annotated[AsyncSession, Depends(get_session)]
++) -> ApiKey | None:
++    """Authenticate X-API-Key (None when auth is disabled by configuration)."""
++    if not get_settings(request).auth_enabled:
++        return None
++    return await authenticate(session, request.headers.get("X-API-Key"))
++
++
++async def limit_writes(
++    request: Request, key: Annotated[ApiKey | None, Depends(require_api_key)]
++) -> None:
++    """Writes are limited per API key (per client address when auth is disabled)."""
++    bucket = f"w:key:{key.id}" if key is not None else f"w:{client_ip(request)}"
++    await _limit(request, getattr(request.app.state, "write_limiter", None), bucket, "write")
++
++
++async def limit_redirects(request: Request) -> None:
++    await _limit(
++        request,
++        getattr(request.app.state, "redirect_limiter", None),
++        f"r:{client_ip(request)}",
++        "redirect",
++    )
+diff --git a/service/api/health.py b/service/api/health.py
+index 1589d03..7029bc7 100644
+--- a/service/api/health.py
++++ b/service/api/health.py
+@@ -1,9 +1,9 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
+ """Liveness and readiness probes."""
+ 
+ from typing import Annotated
+ 
+-from fastapi import APIRouter, Depends
++from fastapi import APIRouter, Depends, Request
+ from fastapi.responses import JSONResponse
+ 
+ from service.api.deps import get_database
+@@ -19,8 +19,8 @@ async def healthz() -> dict[str, str]:
+     return {"status": "ok"}
+ 
+ 
+-@router.get("/readyz", summary="Readiness probe (database reachable)")
+-async def readyz(db: Annotated[Database, Depends(get_database)]) -> JSONResponse:
++@router.get("/readyz", summary="Readiness probe (database and cache reachable)")
++async def readyz(request: Request, db: Annotated[Database, Depends(get_database)]) -> JSONResponse:
+     checks: dict[str, str] = {}
+     try:
+         await db.ping()
+@@ -30,6 +30,15 @@ async def readyz(db: Annotated[Database, Depends(get_database)]) -> JSONResponse
+             "readiness check failed", extra={"check": "database", "error": type(exc).__name__}
+         )
+         checks["database"] = "unavailable"
++    cache = getattr(request.app.state, "cache", None)
++    if cache is not None:
++        try:
++            checks[f"cache:{cache.backend}"] = "ok" if await cache.ping() else "unavailable"
++        except Exception as exc:
++            log.warning(
++                "readiness check failed", extra={"check": "cache", "error": type(exc).__name__}
++            )
++            checks[f"cache:{cache.backend}"] = "unavailable"
+     ready = all(v == "ok" for v in checks.values())
+     return JSONResponse(
+         {"status": "ready" if ready else "not_ready", "checks": checks},
+diff --git a/service/api/links.py b/service/api/links.py
+index 05431ec..9064f5e 100644
+--- a/service/api/links.py
++++ b/service/api/links.py
+@@ -1,26 +1,36 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Link management API (/api/v1/links)."""
+ 
+ from typing import Annotated
+ 
+ from fastapi import APIRouter, Depends, Header, Response, status
+ 
+-from service.api.deps import get_link_service
++from service.api.deps import get_link_service, limit_writes, require_api_key
+ from service.links import LinkService
++from service.models import ApiKey
+ from service.schemas import LinkCreate, LinkOut, LinkUpdate
+ 
+ router = APIRouter(prefix="/api/v1/links", tags=["links"])
+ Service = Annotated[LinkService, Depends(get_link_service)]
++Caller = Annotated[ApiKey | None, Depends(require_api_key)]
+ 
+ 
+-@router.post("", status_code=status.HTTP_201_CREATED, response_model=LinkOut)
++@router.post(
++    "",
++    status_code=status.HTTP_201_CREATED,
++    response_model=LinkOut,
++    dependencies=[Depends(limit_writes)],
++)
+ async def create_link(
+     payload: LinkCreate,
+     response: Response,
+     service: Service,
++    caller: Caller,
+     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
+ ) -> LinkOut:
+-    link, created = await service.create(payload, idempotency_key)
++    owner = caller.id if caller is not None else None
++    link, created = await service.create(payload, idempotency_key, owner_key_id=owner)
+     if not created:
+         response.headers["Idempotent-Replayed"] = "true"
+     response.headers["Location"] = f"/api/v1/links/{link.code}"
+@@ -32,12 +42,15 @@ async def get_link(code: str, service: Service) -> LinkOut:
+     return service.to_out(await service.get(code))
+ 
+ 
+-@router.patch("/{code}", response_model=LinkOut)
+-async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
+-    return service.to_out(await service.update(code, patch))
++@router.patch("/{code}", response_model=LinkOut, dependencies=[Depends(limit_writes)])
++async def update_link(code: str, patch: LinkUpdate, service: Service, caller: Caller) -> LinkOut:
++    actor = caller.id if caller is not None else None
++    return service.to_out(await service.update(code, patch, actor_key_id=actor))
+ 
+ 
+-@router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)
+-async def delete_link(code: str, service: Service) -> Response:
+-    await service.delete(code)
++@router.delete(
++    "/{code}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(limit_writes)]
++)
++async def delete_link(code: str, service: Service, caller: Caller) -> Response:
++    await service.delete(code, actor_key_id=caller.id if caller is not None else None)
+     return Response(status_code=status.HTTP_204_NO_CONTENT)
+diff --git a/service/api/redirect.py b/service/api/redirect.py
+index f07302d..00e22b0 100644
+--- a/service/api/redirect.py
++++ b/service/api/redirect.py
+@@ -1,4 +1,5 @@
+-# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.analytics
++# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.analytics,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring
+ """Public redirect endpoint (registered last so fixed routes win)."""
+ 
+ from typing import Annotated
+@@ -7,7 +8,7 @@ from fastapi import APIRouter, Depends, Path, Request
+ from fastapi.responses import RedirectResponse
+ 
+ from service.analytics import ClickEvent
+-from service.api.deps import get_link_service
++from service.api.deps import get_link_service, limit_redirects
+ from service.db import utcnow
+ from service.links import LinkService
+ from service.observability import get_logger
+@@ -39,7 +40,12 @@ def record_click(request: Request, link_id: int) -> None:
+     "/{code}",
+     status_code=302,
+     response_class=RedirectResponse,
+-    responses={404: {"description": "Unknown code"}, 410: {"description": "Expired or disabled"}},
++    responses={
++        404: {"description": "Unknown code"},
++        410: {"description": "Expired or disabled"},
++        429: {"description": "Rate limited"},
++    },
++    dependencies=[Depends(limit_redirects)],
+ )
+ async def follow(
+     request: Request,
+@@ -48,6 +54,8 @@ async def follow(
+ ) -> RedirectResponse:
+     link = await service.resolve(code)
+     record_click(request, link.id)
++    if service.metrics is not None:
++        service.metrics.redirects.labels("ok").inc()
+     return RedirectResponse(
+         link.target_url,
+         status_code=service.settings.redirect_status_code,
+diff --git a/service/app.py b/service/app.py
+index 3aaa131..868ce62 100644
+--- a/service/app.py
++++ b/service/app.py
+@@ -1,8 +1,10 @@
+-# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
++# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring
+ """Application factory."""
+ 
+ from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager
++from typing import Any
+ 
+ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+@@ -15,14 +17,35 @@ from service.api.middleware import (
+     RequestContextMiddleware,
+     SecurityHeadersMiddleware,
+ )
++from service.cache import Cache, build_cache, redis_client
+ from service.config import Settings, get_settings
+ from service.db import Database, migrate
+ from service.errors import install_error_handlers
++from service.metrics import Metrics, MetricsMiddleware
++from service.metrics import router as metrics_router
+ from service.observability import configure_logging, get_logger
++from service.ratelimit import MemoryRateLimiter, RateLimiter, RedisRateLimiter
+ 
+ log = get_logger("app")
+ 
+ 
++def build_limiters(
++    settings: Settings, redis: Any | None
++) -> tuple[RateLimiter | None, RateLimiter | None]:
++    if not settings.rate_limit_enabled:
++        return None, None
++
++    def make(capacity: int, refill_per_s: float) -> RateLimiter:
++        if redis is not None:
++            return RedisRateLimiter(redis, capacity, refill_per_s)
++        return MemoryRateLimiter(capacity, refill_per_s)
++
++    return (
++        make(settings.rate_limit_write_capacity, settings.rate_limit_write_refill_per_s),
++        make(settings.rate_limit_redirect_capacity, settings.rate_limit_redirect_refill_per_s),
++    )
++
++
+ def create_app(settings: Settings | None = None) -> FastAPI:
+     settings = settings or get_settings()
+ 
+@@ -32,6 +55,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         if settings.db_auto_migrate:
+             await migrate(settings.database_url)
+         app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
++        redis = redis_client(settings.redis_url) if settings.redis_url else None
++        cache: Cache | None = None
++        if settings.cache_enabled:
++            cache = build_cache(None, max_entries=settings.cache_max_entries, client=redis)
++        app.state.cache = cache
++        app.state.write_limiter, app.state.redirect_limiter = build_limiters(settings, redis)
+         app.state.recorder = None
+         if settings.analytics_enabled:
+             app.state.recorder = ClickRecorder(
+@@ -43,12 +72,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+                 purge_interval_s=settings.analytics_purge_interval_s,
+             )
+             await app.state.recorder.start()
+-        log.info("startup complete", extra={"environment": settings.environment})
++            recorder = app.state.recorder
++            metrics.bind_gauge(metrics.analytics_dropped, lambda: float(recorder.dropped))
++            metrics.bind_gauge(metrics.analytics_queue, lambda: float(recorder.queue.qsize()))
++        log.info(
++            "startup complete",
++            extra={"environment": settings.environment, "cache": cache.backend if cache else None},
++        )
+         try:
+             yield
+         finally:
+             if app.state.recorder is not None:
+                 await app.state.recorder.stop()
++            if cache is not None:
++                await cache.close()
++            elif redis is not None:
++                await redis.aclose()
+             await app.state.db.dispose()
+ 
+     app = FastAPI(
+@@ -58,6 +97,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         openapi_url="/api/v1/openapi.json",
+     )
+     app.state.settings = settings
++    metrics = Metrics()
++    app.state.metrics = metrics
+     install_error_handlers(app)
+     if settings.cors_origins:
+         app.add_middleware(
+@@ -68,9 +109,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         )
+     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+     app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
++    if settings.metrics_enabled:
++        app.add_middleware(MetricsMiddleware, metrics=metrics)
+     app.add_middleware(RequestContextMiddleware)
+ 
+     app.include_router(health.router)
++    if settings.metrics_enabled:
++        app.include_router(metrics_router)
+     app.include_router(links.router)
+     app.include_router(stats.router)
+     app.include_router(redirect.router)  # catch-all /{code}: keep last
+diff --git a/service/auth.py b/service/auth.py
+new file mode 100644
+index 0000000..2f504d5
+--- /dev/null
++++ b/service/auth.py
+@@ -0,0 +1,90 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++"""API-key authentication for write endpoints.
++
++Keys look like ``usk_<8 hex prefix>_<43 char secret>`` (256 bits of entropy). Only the SHA-256 of
++the full key is stored; the prefix is an indexed lookup handle. A slow KDF is unnecessary for keys
++with this much entropy (unlike passwords). Comparison uses ``hmac.compare_digest`` and a hash is
++computed even for unknown prefixes so failures take similar time.
++"""
++
++import hashlib
++import hmac
++import re
++import secrets
++from dataclasses import dataclass
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.db import utcnow
++from service.errors import AppError
++from service.models import ApiKey
++
++SCHEME = "usk"
++_KEY_RE = re.compile(r"^usk_([0-9a-f]{8})_([A-Za-z0-9_-]{20,64})$")
++_DUMMY_HASH = hashlib.sha256(b"dummy").hexdigest()
++
++
++class UnauthorizedError(AppError):
++    status_code = 401
++    code = "unauthorized"
++
++    def __init__(self, message: str = "a valid X-API-Key header is required") -> None:
++        super().__init__(message, headers={"WWW-Authenticate": 'ApiKey realm="url-shortener"'})
++
++
++class ForbiddenError(AppError):
++    status_code = 403
++    code = "forbidden"
++
++
++@dataclass(frozen=True)
++class IssuedKey:
++    key: str
++    prefix: str
++    key_hash: str
++
++
++def hash_key(key: str) -> str:
++    return hashlib.sha256(key.encode()).hexdigest()
++
++
++def generate_key() -> IssuedKey:
++    prefix = secrets.token_hex(4)
++    key = f"{SCHEME}_{prefix}_{secrets.token_urlsafe(32)}"
++    return IssuedKey(key=key, prefix=prefix, key_hash=hash_key(key))
++
++
++async def create_api_key(session: AsyncSession, name: str) -> str:
++    """Persist a new key and return the plaintext (shown once, never stored)."""
++    issued = generate_key()
++    session.add(ApiKey(name=name, prefix=issued.prefix, key_hash=issued.key_hash))
++    await session.commit()
++    return issued.key
++
++
++async def revoke_api_key(session: AsyncSession, prefix: str) -> bool:
++    key = (
++        await session.execute(select(ApiKey).where(ApiKey.prefix == prefix))
++    ).scalar_one_or_none()
++    if key is None or key.revoked_at is not None:
++        return False
++    key.revoked_at = utcnow()
++    await session.commit()
++    return True
++
++
++async def authenticate(session: AsyncSession, presented: str | None) -> ApiKey:
++    if not presented:
++        raise UnauthorizedError()
++    match = _KEY_RE.match(presented.strip())
++    if match is None:
++        raise UnauthorizedError("malformed API key")
++    record = (
++        await session.execute(select(ApiKey).where(ApiKey.prefix == match.group(1)))
++    ).scalar_one_or_none()
++    expected = record.key_hash if record is not None else _DUMMY_HASH
++    valid = hmac.compare_digest(hash_key(presented.strip()), expected)
++    if record is None or not valid or record.revoked_at is not None:
++        raise UnauthorizedError("invalid or revoked API key")
++    return record
+diff --git a/service/cache.py b/service/cache.py
+new file mode 100644
+index 0000000..2698cce
+--- /dev/null
++++ b/service/cache.py
+@@ -0,0 +1,99 @@
++# lineage: REQ-AMBIGUOUS / implement.cache_backend (see runs/ for the decision trail)
++"""Cache abstraction: bounded in-memory TTL LRU (single process) or Redis (shared)."""
++
++import time
++from collections import OrderedDict
++from typing import Any, Protocol
++
++import redis.asyncio as redis_asyncio
++
++
++class Cache(Protocol):
++    backend: str
++
++    async def get(self, key: str) -> str | None: ...
++
++    async def set(self, key: str, value: str, ttl_s: float) -> None: ...
++
++    async def delete(self, *keys: str) -> None: ...
++
++    async def ping(self) -> bool: ...
++
++    async def close(self) -> None: ...
++
++
++class MemoryCache:
++    """LRU with per-entry TTL. Safe within one event loop (no awaits while mutating)."""
++
++    backend = "memory"
++
++    def __init__(self, max_entries: int = 10_000) -> None:
++        self.max_entries = max_entries
++        self._data: OrderedDict[str, tuple[float, str]] = OrderedDict()
++
++    async def get(self, key: str) -> str | None:
++        item = self._data.get(key)
++        if item is None:
++            return None
++        expires, value = item
++        if expires <= time.monotonic():
++            del self._data[key]
++            return None
++        self._data.move_to_end(key)
++        return value
++
++    async def set(self, key: str, value: str, ttl_s: float) -> None:
++        self._data[key] = (time.monotonic() + ttl_s, value)
++        self._data.move_to_end(key)
++        while len(self._data) > self.max_entries:
++            self._data.popitem(last=False)
++
++    async def delete(self, *keys: str) -> None:
++        for key in keys:
++            self._data.pop(key, None)
++
++    async def ping(self) -> bool:
++        return True
++
++    async def close(self) -> None:
++        self._data.clear()
++
++    def __len__(self) -> int:
++        return len(self._data)
++
++
++class RedisCache:
++    backend = "redis"
++
++    def __init__(self, client: Any, prefix: str = "shortener:") -> None:
++        self.client = client
++        self.prefix = prefix
++
++    async def get(self, key: str) -> str | None:
++        value = await self.client.get(self.prefix + key)
++        if value is None:
++            return None
++        return value.decode() if isinstance(value, bytes) else str(value)
++
++    async def set(self, key: str, value: str, ttl_s: float) -> None:
++        await self.client.set(self.prefix + key, value, px=max(int(ttl_s * 1000), 1))
++
++    async def delete(self, *keys: str) -> None:
++        if keys:
++            await self.client.delete(*(self.prefix + k for k in keys))
++
++    async def ping(self) -> bool:
++        return bool(await self.client.ping())
++
++    async def close(self) -> None:
++        await self.client.aclose()
++
++
++def redis_client(url: str) -> Any:
++    return redis_asyncio.from_url(url, socket_timeout=0.5, socket_connect_timeout=0.5)
++
++
++def build_cache(redis_url: str | None, *, max_entries: int = 10_000, client: Any = None) -> Cache:
++    if redis_url or client is not None:
++        return RedisCache(client if client is not None else redis_client(str(redis_url)))
++    return MemoryCache(max_entries)
+diff --git a/service/cli.py b/service/cli.py
+new file mode 100644
+index 0000000..786c71a
+--- /dev/null
++++ b/service/cli.py
+@@ -0,0 +1,62 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++"""Operational CLI.
++
++python -m service.cli migrate
++python -m service.cli create-key --name ci-pipeline
++python -m service.cli list-keys
++python -m service.cli revoke-key <prefix>
++"""
++
++import argparse
++import asyncio
++import sys
++
++from sqlalchemy import select
++
++from service.auth import create_api_key, revoke_api_key
++from service.config import Settings
++from service.db import Database, migrate
++from service.models import ApiKey
++
++
++async def _run(args: argparse.Namespace, settings: Settings) -> int:
++    if args.command == "migrate":
++        await migrate(settings.database_url)
++        print("database migrated to head")
++        return 0
++    db = Database(settings.database_url)
++    try:
++        async with db.session() as session:
++            if args.command == "create-key":
++                key = await create_api_key(session, args.name)
++                print(key)
++                print("store this key now; it cannot be shown again", file=sys.stderr)
++                return 0
++            if args.command == "revoke-key":
++                ok = await revoke_api_key(session, args.prefix)
++                print("revoked" if ok else "no active key with that prefix")
++                return 0 if ok else 1
++            rows = (await session.execute(select(ApiKey).order_by(ApiKey.id))).scalars().all()
++            for row in rows:
++                state = "revoked" if row.revoked_at else "active"
++                print(f"{row.prefix}\t{row.name}\t{state}\t{row.created_at.isoformat()}")
++            return 0
++    finally:
++        await db.dispose()
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(prog="python -m service.cli")
++    sub = parser.add_subparsers(dest="command", required=True)
++    sub.add_parser("migrate", help="upgrade the database schema to head")
++    create = sub.add_parser("create-key", help="create an API key (printed once)")
++    create.add_argument("--name", required=True)
++    revoke = sub.add_parser("revoke-key", help="revoke an API key by prefix")
++    revoke.add_argument("prefix")
++    sub.add_parser("list-keys", help="list API keys (prefix, name, state)")
++    args = parser.parse_args(argv)
++    return asyncio.run(_run(args, Settings()))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/service/config.py b/service/config.py
+index 34cc0c4..96c49e3 100644
+--- a/service/config.py
++++ b/service/config.py
+@@ -1,4 +1,5 @@
+-# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics
++# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+ 
+ import secrets
+@@ -42,6 +43,21 @@ class Settings(BaseSettings):
+     analytics_batch_size: int = Field(200, ge=1, le=10_000)
+     analytics_purge_interval_s: float = Field(3600.0, gt=0)
+ 
++    # Shared Redis for cache + rate limits (multi-replica); in-process fallbacks when unset.
++    redis_url: str | None = None
++    cache_enabled: bool = True
++    cache_ttl_s: float = Field(300.0, gt=0)
++    cache_negative_ttl_s: float = Field(5.0, gt=0)
++    cache_max_entries: int = Field(10_000, ge=1)
++    rate_limit_enabled: bool = True
++    rate_limit_write_capacity: int = Field(60, ge=1)
++    rate_limit_write_refill_per_s: float = Field(1.0, gt=0)
++    rate_limit_redirect_capacity: int = Field(300, ge=1)
++    rate_limit_redirect_refill_per_s: float = Field(50.0, gt=0)
++    metrics_enabled: bool = True
++    # Write endpoints require X-API-Key (redirects, metadata and stats stay public).
++    auth_enabled: bool = True
++
+     @field_validator("base_url")
+     @classmethod
+     def _strip_trailing_slash(cls, value: str) -> str:
+diff --git a/service/links.py b/service/links.py
+index 4c4c140..58c3b43 100644
+--- a/service/links.py
++++ b/service/links.py
+@@ -1,18 +1,24 @@
+-# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
++# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+ 
+ import hashlib
+ import json
++from dataclasses import asdict, dataclass
+ from datetime import datetime
++from typing import Any
+ 
+ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from service.auth import ForbiddenError
++from service.cache import Cache
+ from service.config import Settings
+ from service.db import utcnow
+ from service.domain.codes import AliasError, generate_code, normalize_alias
+ from service.domain.urls import UrlError, normalize_url
+ from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
++from service.metrics import Metrics
+ from service.models import Link
+ from service.observability import get_logger
+ from service.repository import LinkRepository
+@@ -35,16 +41,63 @@ def validate_expiry(value: datetime | None) -> datetime | None:
+     return value
+ 
+ 
++MISSING = "__missing__"
++
++
++@dataclass(frozen=True)
++class Resolved:
++    """What the redirect path needs, small enough to cache."""
++
++    id: int
++    code: str
++    target_url: str
++    is_custom: bool
++    expires_at: datetime | None
++    gone: bool
++
++    @classmethod
++    def from_link(cls, link: Link) -> "Resolved":
++        return cls(
++            id=link.id,
++            code=link.code,
++            target_url=link.target_url,
++            is_custom=link.is_custom,
++            expires_at=link.expires_at,
++            gone=link.deleted_at is not None or link.disabled,
++        )
++
++    def to_json(self) -> str:
++        data = asdict(self)
++        data["expires_at"] = self.expires_at.isoformat() if self.expires_at else None
++        return json.dumps(data)
++
++    @classmethod
++    def from_json(cls, raw: str) -> "Resolved":
++        data: dict[str, Any] = json.loads(raw)
++        expires = data.get("expires_at")
++        data["expires_at"] = datetime.fromisoformat(expires) if expires else None
++        return cls(**data)
++
++
+ def fingerprint(payload: LinkCreate) -> str:
+     canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
+     return hashlib.sha256(canonical.encode()).hexdigest()
+ 
+ 
+ class LinkService:
+-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
++    def __init__(
++        self,
++        session: AsyncSession,
++        settings: Settings,
++        *,
++        cache: Cache | None = None,
++        metrics: Metrics | None = None,
++    ) -> None:
+         self.session = session
+         self.settings = settings
+         self.repo = LinkRepository(session)
++        self.cache = cache
++        self.metrics = metrics
+ 
+     def to_out(self, link: Link) -> LinkOut:
+         return LinkOut(
+@@ -61,7 +114,11 @@ class LinkService:
+         )
+ 
+     async def create(
+-        self, payload: LinkCreate, idempotency_key: str | None = None
++        self,
++        payload: LinkCreate,
++        idempotency_key: str | None = None,
++        *,
++        owner_key_id: int | None = None,
+     ) -> tuple[Link, bool]:
+         """Return ``(link, created)``; ``created`` is False for an idempotent replay."""
+         try:
+@@ -75,7 +132,7 @@ class LinkService:
+         expires_at = validate_expiry(payload.expires_at)
+         digest = fingerprint(payload)
+         if idempotency_key:
+-            replay = await self._replay(idempotency_key, digest)
++            replay = await self._replay(idempotency_key, digest, owner_key_id)
+             if replay is not None:
+                 return replay, False
+ 
+@@ -103,6 +160,7 @@ class LinkService:
+                 is_custom=payload.custom_alias is not None,
+                 tags=list(payload.tags),
+                 expires_at=expires_at,
++                owner_key_id=owner_key_id,
+                 idempotency_key=idempotency_key,
+                 request_fingerprint=digest if idempotency_key else None,
+             )
+@@ -112,7 +170,7 @@ class LinkService:
+             except IntegrityError:
+                 await self.session.rollback()
+                 if idempotency_key:
+-                    replay = await self._replay(idempotency_key, digest)
++                    replay = await self._replay(idempotency_key, digest, owner_key_id)
+                     if replay is not None:
+                         return replay, False
+                 if payload.custom_alias is not None:
+@@ -121,27 +179,86 @@ class LinkService:
+                     ) from None
+                 continue
+             log.info("link created", extra={"code": link.code, "custom": link.is_custom})
++            await self._invalidate(link.code)  # clears a cached "missing" marker
+             return link, True
+         raise ConflictError("could not allocate a unique code; please retry")
+ 
+-    async def _replay(self, key: str, digest: str) -> Link | None:
++    async def _replay(self, key: str, digest: str, owner_key_id: int | None) -> Link | None:
+         existing = await self.repo.get_by_idempotency_key(key)
+         if existing is None:
+             return None
+-        if existing.request_fingerprint != digest:
++        if existing.owner_key_id != owner_key_id or existing.request_fingerprint != digest:
+             raise ConflictError("Idempotency-Key was already used with a different request body")
+         return existing
+ 
+-    async def resolve(self, code: str) -> Link:
+-        """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
++    # ------------------------------------------------------------------ redirect hot path
++
++    async def _cache_get(self, key: str) -> str | None:
++        if self.cache is None:
++            return None
++        try:
++            return await self.cache.get(key)
++        except Exception as exc:  # a cache outage degrades to the database, never to an error
++            log.warning("cache read failed", extra={"error": type(exc).__name__})
++            return None
++
++    async def _cache_set(self, key: str, value: str, ttl_s: float) -> None:
++        if self.cache is None:
++            return
++        try:
++            await self.cache.set(key, value, ttl_s)
++        except Exception as exc:
++            log.warning("cache write failed", extra={"error": type(exc).__name__})
++
++    async def _invalidate(self, code: str) -> None:
++        if self.cache is None:
++            return
++        try:
++            await self.cache.delete(f"link:{code}")
++        except Exception as exc:
++            log.warning("cache invalidation failed", extra={"error": type(exc).__name__})
++
++    def _count(self, result: str) -> None:
++        if self.metrics is not None and self.cache is not None:
++            self.metrics.cache.labels(result).inc()
++
++    async def _lookup(self, code: str) -> Resolved | None:
++        """Read-through cache keyed by canonical code; aliases resolve case-insensitively."""
++        raw = await self._cache_get(f"link:{code}")
++        if raw is None and code != code.lower():
++            alias_raw = await self._cache_get(f"link:{code.lower()}")
++            if (
++                alias_raw is not None
++                and alias_raw != MISSING
++                and Resolved.from_json(alias_raw).is_custom
++            ):
++                raw = alias_raw
++        if raw == MISSING:
++            self._count("hit")
++            return None
++        if raw is not None:
++            self._count("hit")
++            return Resolved.from_json(raw)
++        self._count("miss")
+         link = await self.repo.get_by_code(code)
+         if link is None:
++            if code == code.lower():  # only canonical misses are cached (see ADR-013)
++                await self._cache_set(f"link:{code}", MISSING, self.settings.cache_negative_ttl_s)
++            return None
++        resolved = Resolved.from_link(link)
++        await self._cache_set(f"link:{link.code}", resolved.to_json(), self.settings.cache_ttl_s)
++        return resolved
++
++    async def resolve(self, code: str) -> Resolved:
++        """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
++        resolved = await self._lookup(code)
++        if resolved is None:
+             raise NotFoundError(f"no link with code '{code}'")
+-        if link.deleted_at is not None or link.disabled:
++        if resolved.gone:
+             raise GoneError(f"link '{code}' is no longer available")
+-        if is_expired(link):
++        if resolved.expires_at is not None and resolved.expires_at <= utcnow():
+             raise GoneError(f"link '{code}' has expired")
+-        return link
++        return resolved
+ 
+     async def get(self, code: str) -> Link:
+         link = await self.repo.get_by_code(code)
+@@ -149,19 +266,32 @@ class LinkService:
+             raise NotFoundError(f"no link with code '{code}'")
+         return link
+ 
+-    async def update(self, code: str, patch: LinkUpdate) -> Link:
++    def _authorize(self, link: Link, actor_key_id: int | None) -> None:
++        """Only the creating key may change a link (links created before auth have no owner)."""
++        if not self.settings.auth_enabled or link.owner_key_id is None:
++            return
++        if actor_key_id != link.owner_key_id:
++            raise ForbiddenError("only the API key that created this link may modify it")
++
++    async def update(
++        self, code: str, patch: LinkUpdate, *, actor_key_id: int | None = None
++    ) -> Link:
+         link = await self.get(code)
++        self._authorize(link, actor_key_id)
+         if patch.disabled is not None:
+             link.disabled = patch.disabled
+         if "expires_at" in patch.model_fields_set:
+             link.expires_at = validate_expiry(patch.expires_at)
+         link.updated_at = utcnow()
+         await self.session.commit()
++        await self._invalidate(link.code)
+         return link
+ 
+-    async def delete(self, code: str) -> None:
++    async def delete(self, code: str, *, actor_key_id: int | None = None) -> None:
+         link = await self.get(code)
++        self._authorize(link, actor_key_id)
+         link.deleted_at = utcnow()
+         link.updated_at = link.deleted_at
+         await self.session.commit()
++        await self._invalidate(link.code)
+         log.info("link deleted", extra={"code": code})
+diff --git a/service/metrics.py b/service/metrics.py
+new file mode 100644
+index 0000000..4bdacd2
+--- /dev/null
++++ b/service/metrics.py
+@@ -0,0 +1,102 @@
++# lineage: REQ-AMBIGUOUS / implement.metrics (see runs/ for the decision trail)
++"""Prometheus metrics with a per-app registry (no global state, isolated in tests)."""
++
++import time
++from collections.abc import Callable
++
++from fastapi import APIRouter, Request, Response
++from prometheus_client import (
++    CONTENT_TYPE_LATEST,
++    CollectorRegistry,
++    Counter,
++    Gauge,
++    Histogram,
++    generate_latest,
++)
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
++
++LATENCY_BUCKETS = (0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)
++
++
++class Metrics:
++    def __init__(self) -> None:
++        self.registry = CollectorRegistry()
++        self.requests = Counter(
++            "http_requests_total",
++            "HTTP requests by route template, method and status",
++            ["method", "route", "status"],
++            registry=self.registry,
++        )
++        self.latency = Histogram(
++            "http_request_duration_seconds",
++            "HTTP request latency by route template",
++            ["route"],
++            buckets=LATENCY_BUCKETS,
++            registry=self.registry,
++        )
++        self.redirects = Counter(
++            "redirects_total", "Redirect outcomes", ["outcome"], registry=self.registry
++        )
++        self.cache = Counter(
++            "link_cache_requests_total",
++            "Redirect cache lookups",
++            ["result"],
++            registry=self.registry,
++        )
++        self.rate_limited = Counter(
++            "rate_limited_total",
++            "Requests rejected by rate limiting",
++            ["scope"],
++            registry=self.registry,
++        )
++        self.analytics_dropped = Gauge(
++            "analytics_clicks_dropped",
++            "Clicks dropped because the queue was full",
++            registry=self.registry,
++        )
++        self.analytics_queue = Gauge(
++            "analytics_queue_depth", "Clicks waiting to be written", registry=self.registry
++        )
++
++    def bind_gauge(self, gauge: Gauge, fn: Callable[[], float]) -> None:
++        gauge.set_function(fn)
++
++    def render(self) -> bytes:
++        return generate_latest(self.registry)
++
++
++class MetricsMiddleware:
++    """Records request count/latency labelled by the *route template* (bounded cardinality)."""
++
++    def __init__(self, app: ASGIApp, *, metrics: Metrics) -> None:
++        self.app = app
++        self.metrics = metrics
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++        started = time.perf_counter()
++        status = 500
++
++        async def send_wrapper(message: Message) -> None:
++            nonlocal status
++            if message["type"] == "http.response.start":
++                status = message["status"]
++            await send(message)
++
++        try:
++            await self.app(scope, receive, send_wrapper)
++        finally:
++            route = getattr(scope.get("route"), "path", "unmatched")
++            self.metrics.requests.labels(scope["method"], route, str(status)).inc()
++            self.metrics.latency.labels(route).observe(time.perf_counter() - started)
++
++
++router = APIRouter(tags=["observability"])
++
++
++@router.get("/metrics", include_in_schema=False)
++async def metrics_endpoint(request: Request) -> Response:
++    metrics: Metrics = request.app.state.metrics
++    return Response(metrics.render(), media_type=CONTENT_TYPE_LATEST)
+diff --git a/service/migrations/versions/rev_0003_api_keys.py b/service/migrations/versions/rev_0003_api_keys.py
+new file mode 100644
+index 0000000..efbc066
+--- /dev/null
++++ b/service/migrations/versions/rev_0003_api_keys.py
+@@ -0,0 +1,45 @@
++# lineage: REQ-AMBIGUOUS / implement.auth_migration (see runs/ for the decision trail)
++"""Add api_keys and links.owner_key_id (additive, reversible).
++
++Revision ID: 0003
++Revises: 0002
++Create Date: 2026-10-07
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "0003"
++down_revision: str | None = "0002"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "api_keys",
++        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column("name", sa.String(length=100), nullable=False),
++        sa.Column("prefix", sa.String(length=16), nullable=False),
++        sa.Column("key_hash", sa.String(length=64), nullable=False),
++        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
++    )
++    op.create_index("ix_api_keys_prefix", "api_keys", ["prefix"], unique=True)
++    with op.batch_alter_table("links") as batch:
++        batch.add_column(sa.Column("owner_key_id", sa.Integer(), nullable=True))
++        batch.create_foreign_key(
++            "fk_links_owner_key_id", "api_keys", ["owner_key_id"], ["id"], ondelete="SET NULL"
++        )
++        batch.create_index("ix_links_owner_key_id", ["owner_key_id"])
++
++
++def downgrade() -> None:
++    with op.batch_alter_table("links") as batch:
++        batch.drop_index("ix_links_owner_key_id")
++        batch.drop_constraint("fk_links_owner_key_id", type_="foreignkey")
++        batch.drop_column("owner_key_id")
++    op.drop_index("ix_api_keys_prefix", table_name="api_keys")
++    op.drop_table("api_keys")
+diff --git a/service/models.py b/service/models.py
+index f5a13d5..10d91a6 100644
+--- a/service/models.py
++++ b/service/models.py
+@@ -1,4 +1,5 @@
+-# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.migration_0002
++# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.migration_0002,
++#          REQ-AMBIGUOUS / implement.auth_migration
+ """Persistence model."""
+ 
+ from datetime import date, datetime
+@@ -24,6 +25,22 @@ class Link(Base):
+     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+     request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
++    owner_key_id: Mapped[int | None] = mapped_column(
++        ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True, index=True
++    )
++
++
++class ApiKey(Base):
++    """An API key. Only a SHA-256 hash of the full key is stored; the prefix is for lookup."""
++
++    __tablename__ = "api_keys"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
++    name: Mapped[str] = mapped_column(String(100))
++    prefix: Mapped[str] = mapped_column(String(16), unique=True, index=True)
++    key_hash: Mapped[str] = mapped_column(String(64))
++    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
++    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+ 
+ 
+ class Click(Base):
+diff --git a/service/ratelimit.py b/service/ratelimit.py
+new file mode 100644
+index 0000000..89b303b
+--- /dev/null
++++ b/service/ratelimit.py
+@@ -0,0 +1,116 @@
++# lineage: REQ-AMBIGUOUS / implement.rate_limiter (see runs/ for the decision trail)
++"""Token-bucket rate limiting (in-memory per process, or Redis via an atomic Lua script)."""
++
++import time
++from collections import OrderedDict
++from dataclasses import dataclass
++from typing import Any, Protocol
++
++from service.errors import AppError
++
++
++class RateLimitedError(AppError):
++    status_code = 429
++    code = "rate_limited"
++
++
++@dataclass(frozen=True)
++class Decision:
++    allowed: bool
++    limit: int
++    remaining: int
++    retry_after_s: float
++
++    def headers(self) -> dict[str, str]:
++        headers = {
++            "X-RateLimit-Limit": str(self.limit),
++            "X-RateLimit-Remaining": str(self.remaining),
++        }
++        if not self.allowed:
++            headers["Retry-After"] = str(max(1, round(self.retry_after_s + 0.5)))
++        return headers
++
++
++class RateLimiter(Protocol):
++    capacity: int
++
++    async def hit(self, key: str) -> Decision: ...
++
++
++def _decide(tokens: float, capacity: int, refill_per_s: float, allowed: bool) -> Decision:
++    retry = 0.0 if allowed else (1 - tokens) / refill_per_s
++    return Decision(allowed, capacity, int(tokens), retry)
++
++
++class MemoryRateLimiter:
++    def __init__(self, capacity: int, refill_per_s: float, *, max_keys: int = 100_000) -> None:
++        self.capacity = capacity
++        self.refill_per_s = refill_per_s
++        self.max_keys = max_keys
++        self._buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
++
++    async def hit(self, key: str) -> Decision:
++        now = time.monotonic()
++        tokens, updated = self._buckets.get(key, (float(self.capacity), now))
++        tokens = min(float(self.capacity), tokens + (now - updated) * self.refill_per_s)
++        allowed = tokens >= 1
++        if allowed:
++            tokens -= 1
++        self._buckets[key] = (tokens, now)
++        self._buckets.move_to_end(key)
++        while len(self._buckets) > self.max_keys:
++            self._buckets.popitem(last=False)
++        return _decide(tokens, self.capacity, self.refill_per_s, allowed)
++
++
++BUCKET_SCRIPT_LUA = """
++local capacity = tonumber(ARGV[1])
++local rate = tonumber(ARGV[2])
++local now = tonumber(ARGV[3])
++local ttl = tonumber(ARGV[4])
++local data = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
++local tokens = tonumber(data[1])
++local ts = tonumber(data[2])
++if tokens == nil then
++  tokens = capacity
++  ts = now
++end
++tokens = math.min(capacity, tokens + math.max(0, now - ts) * rate)
++local allowed = 0
++if tokens >= 1 then
++  tokens = tokens - 1
++  allowed = 1
++end
++redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'ts', tostring(now))
++redis.call('EXPIRE', KEYS[1], ttl)
++return {allowed, tostring(tokens)}
++"""
++
++
++class RedisRateLimiter:
++    """Shared across replicas; the Lua script makes read-modify-write atomic."""
++
++    def __init__(
++        self, client: Any, capacity: int, refill_per_s: float, prefix: str = "rl:"
++    ) -> None:
++        self.client = client
++        self.capacity = capacity
++        self.refill_per_s = refill_per_s
++        self.prefix = prefix
++        self._script = client.register_script(BUCKET_SCRIPT_LUA)
++        self._ttl = max(int(capacity / refill_per_s) + 1, 1)
++
++    async def hit(self, key: str) -> Decision:
++        allowed, tokens = await self._script(
++            keys=[self.prefix + key],
++            args=[self.capacity, self.refill_per_s, time.time(), self._ttl],
++        )
++        tokens_f = float(tokens.decode() if isinstance(tokens, bytes) else tokens)
++        return _decide(tokens_f, self.capacity, self.refill_per_s, bool(int(allowed)))
++
++
++async def enforce(limiter: RateLimiter, key: str) -> Decision:
++    decision = await limiter.hit(key)
++    if not decision.allowed:
++        raise RateLimitedError("rate limit exceeded; retry later", headers=decision.headers())
++    return decision
+diff --git a/tests/service/conftest.py b/tests/service/conftest.py
+index e5d85e1..7e1890e 100644
+--- a/tests/service/conftest.py
++++ b/tests/service/conftest.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.api_key_auth
+ import shutil
+ from collections.abc import AsyncIterator
+ from pathlib import Path
+@@ -8,6 +8,7 @@ from fastapi import FastAPI
+ from httpx import ASGITransport, AsyncClient
+ 
+ from service.app import create_app
++from service.auth import create_api_key
+ from service.config import Settings
+ from service.db import run_migrations
+ 
+@@ -40,7 +41,31 @@ async def app(settings: Settings) -> AsyncIterator[FastAPI]:
+         yield application
+ 
+ 
++async def issue_key(app: FastAPI, name: str = "test") -> str:
++    """Create an API key in the app's database (write endpoints require one)."""
++    async with app.state.db.session() as session:
++        return await create_api_key(session, name)
++
++
++def authed(app: FastAPI, key: str, base_url: str = "http://testserver") -> AsyncClient:
++    return AsyncClient(
++        transport=ASGITransport(app=app), base_url=base_url, headers={"X-API-Key": key}
++    )
++
++
++@pytest.fixture
++async def api_key(app: FastAPI) -> str:
++    return await issue_key(app)
++
++
++@pytest.fixture
++async def client(app: FastAPI, api_key: str) -> AsyncIterator[AsyncClient]:
++    """Authenticated client (the common case for write endpoints)."""
++    async with authed(app, api_key) as c:
++        yield c
++
++
+ @pytest.fixture
+-async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
++async def anon_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
+         yield c
+diff --git a/tests/service/test_api_links.py b/tests/service/test_api_links.py
+index 328b133..0d47bad 100644
+--- a/tests/service/test_api_links.py
++++ b/tests/service/test_api_links.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api, REQ-AMBIGUOUS / implement.api_key_auth
+ from httpx import AsyncClient
+ 
+ from service.config import Settings
+@@ -101,14 +101,10 @@ async def test_metadata_patch_and_soft_delete(client: AsyncClient) -> None:
+ 
+ 
+ async def test_redirect_status_is_configurable(settings: Settings) -> None:
+-    from httpx import ASGITransport
+-
+     from service.app import create_app
++    from tests.service.conftest import authed, issue_key
+ 
+     app = create_app(settings.model_copy(update={"redirect_status_code": 307}))
+-    async with (
+-        app.router.lifespan_context(app),
+-        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+-    ):
++    async with app.router.lifespan_context(app), authed(app, await issue_key(app), "http://t") as c:
+         code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+         assert (await c.get(f"/{code}")).status_code == 307
+diff --git a/tests/service/test_auth.py b/tests/service/test_auth.py
+new file mode 100644
+index 0000000..1b1762e
+--- /dev/null
++++ b/tests/service/test_auth.py
+@@ -0,0 +1,95 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++import hashlib
++import os
++
++import pytest
++from fastapi import FastAPI
++from httpx import AsyncClient
++from sqlalchemy import select
++
++from service import cli
++from service.auth import authenticate, create_api_key, generate_key, revoke_api_key
++from service.config import Settings
++from service.models import ApiKey
++
++
++async def test_write_endpoints_require_a_valid_key(app: FastAPI, anon_client: AsyncClient) -> None:
++    missing = await anon_client.post("/api/v1/links", json={"url": "https://e.com"})
++    assert missing.status_code == 401
++    assert missing.json()["error"]["code"] == "unauthorized"
++    assert missing.headers["WWW-Authenticate"].startswith("ApiKey")
++    for bad in ("garbage", "usk_zzzzzzzz_" + "a" * 43, generate_key().key):
++        resp = await anon_client.post(
++            "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": bad}
++        )
++        assert resp.status_code == 401, bad
++    async with app.state.db.session() as session:
++        revoked = await create_api_key(session, "old")
++        assert await revoke_api_key(session, revoked.split("_")[1])
++        assert not await revoke_api_key(session, revoked.split("_")[1])
++    resp = await anon_client.post(
++        "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": revoked}
++    )
++    assert resp.status_code == 401
++    assert (
++        await anon_client.patch("/api/v1/links/abc", json={"disabled": True})
++    ).status_code == 401
++    assert (await anon_client.delete("/api/v1/links/abc")).status_code == 401
++
++
++async def test_read_endpoints_and_redirect_stay_public(
++    client: AsyncClient, anon_client: AsyncClient
++) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/pub"})).json()["code"]
++    assert (await anon_client.get(f"/{code}")).status_code == 302
++    assert (await anon_client.get(f"/api/v1/links/{code}")).status_code == 200
++    assert (await anon_client.get(f"/api/v1/links/{code}/stats")).status_code == 200
++
++
++async def test_keys_are_hashed_at_rest(app: FastAPI, api_key: str) -> None:
++    async with app.state.db.session() as session:
++        rows = (await session.execute(select(ApiKey))).scalars().all()
++        assert len(rows) == 1
++        row = rows[0]
++        assert row.key_hash == hashlib.sha256(api_key.encode()).hexdigest()
++        assert api_key not in " ".join(str(v) for v in vars(row).values())
++        assert api_key.split("_")[1] == row.prefix
++        assert (await authenticate(session, api_key)).id == row.id
++
++
++async def test_cli_creates_lists_and_revokes_keys(
++    settings: Settings,
++    app: FastAPI,
++    capsys: pytest.CaptureFixture[str],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setenv("SHORTENER_DATABASE_URL", settings.database_url)
++    assert os.environ["SHORTENER_DATABASE_URL"] == settings.database_url
++    assert await _cli(["create-key", "--name", "ops"]) == 0
++    key = capsys.readouterr().out.strip()
++    assert key.startswith("usk_")
++    assert await _cli(["list-keys"]) == 0
++    listing = capsys.readouterr().out
++    assert "ops\tactive" in listing
++    assert key not in listing
++    assert await _cli(["revoke-key", key.split("_")[1]]) == 0
++    assert await _cli(["revoke-key", "ffffffff"]) == 1
++    async with app.state.db.session() as session:
++        with pytest.raises(Exception, match="revoked"):
++            await authenticate(session, key)
++
++
++async def _cli(argv: list[str]) -> int:
++    import asyncio
++
++    return await asyncio.to_thread(cli.main, argv)
++
++
++async def test_auth_can_be_disabled(settings: Settings) -> None:
++    from tests.service.test_enterprise import started
++
++    async with started(settings, auth_enabled=False) as (_app, c):
++        assert "X-API-Key" not in c.headers
++        assert (
++            await c.post("/api/v1/links", json={"url": "https://e.com/open"})
++        ).status_code == 201
+diff --git a/tests/service/test_auth_security.py b/tests/service/test_auth_security.py
+new file mode 100644
+index 0000000..96d5525
+--- /dev/null
++++ b/tests/service/test_auth_security.py
+@@ -0,0 +1,77 @@
++# lineage: REQ-AMBIGUOUS / test.auth_security (see runs/ for the decision trail)
++"""Abuse cases for authentication and authorization."""
++
++import pytest
++from fastapi import FastAPI
++from httpx import AsyncClient
++
++from service.config import Settings
++from tests.service.conftest import authed, issue_key
++
++
++async def test_only_the_owner_can_modify_a_link(app: FastAPI, client: AsyncClient) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/own"})).json()["code"]
++    async with authed(app, await issue_key(app, "intruder")) as intruder:
++        patch = await intruder.patch(f"/api/v1/links/{code}", json={"disabled": True})
++        assert patch.status_code == 403
++        assert patch.json()["error"]["code"] == "forbidden"
++        assert (await intruder.delete(f"/api/v1/links/{code}")).status_code == 403
++        assert (await intruder.get(f"/{code}")).status_code == 302  # reads stay public
++    assert (await client.patch(f"/api/v1/links/{code}", json={"disabled": True})).status_code == 200
++
++
++@pytest.mark.parametrize(
++    "header",
++    [
++        "",
++        " ",
++        "usk_",
++        "usk__",
++        "Bearer x",
++        "usk_12345678_short",
++        "usk_1234567g_" + "a" * 43,
++        "x" * 5000,
++        "usk_12345678_" + "é" * 30,
++    ],
++)
++async def test_malformed_keys_are_rejected_cleanly(anon_client: AsyncClient, header: str) -> None:
++    resp = await anon_client.post(
++        "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": header.encode()}
++    )
++    assert resp.status_code == 401
++
++
++async def test_idempotency_keys_are_scoped_per_owner(app: FastAPI, client: AsyncClient) -> None:
++    body = {"url": "https://e.com/idem"}
++    first = await client.post("/api/v1/links", json=body, headers={"Idempotency-Key": "shared"})
++    assert first.status_code == 201
++    async with authed(app, await issue_key(app, "other")) as other:
++        clash = await other.post("/api/v1/links", json=body, headers={"Idempotency-Key": "shared"})
++    assert clash.status_code == 409  # never replays another owner's link
++
++
++async def test_rate_limits_are_per_api_key(settings: Settings) -> None:
++    from tests.service.test_enterprise import started
++
++    async with started(
++        settings, rate_limit_write_capacity=1, rate_limit_write_refill_per_s=0.001
++    ) as (app, a):
++        assert (await a.post("/api/v1/links", json={"url": "https://e.com/1"})).status_code == 201
++        assert (await a.post("/api/v1/links", json={"url": "https://e.com/2"})).status_code == 429
++        async with authed(app, await issue_key(app, "b"), "http://t") as b:
++            assert (
++                await b.post("/api/v1/links", json={"url": "https://e.com/3"})
++            ).status_code == 201
++
++
++async def test_presented_keys_never_reach_logs(
++    anon_client: AsyncClient, client: AsyncClient, api_key: str, capfd: pytest.CaptureFixture[str]
++) -> None:
++    wrong = api_key[:-4] + "zzzz"
++    await anon_client.post(
++        "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": wrong}
++    )
++    await client.post("/api/v1/links", json={"url": "https://e.com/ok"})
++    out, err = capfd.readouterr()
++    assert api_key not in out + err
++    assert wrong not in out + err
+diff --git a/tests/service/test_cache.py b/tests/service/test_cache.py
+new file mode 100644
+index 0000000..1037978
+--- /dev/null
++++ b/tests/service/test_cache.py
+@@ -0,0 +1,55 @@
++# lineage: REQ-AMBIGUOUS / implement.cache_backend (see runs/ for the decision trail)
++import asyncio
++
++import fakeredis
++import pytest
++
++from service.cache import Cache, MemoryCache, RedisCache, build_cache
++
++
++@pytest.fixture(params=["memory", "redis"])
++async def cache(request: pytest.FixtureRequest) -> Cache:
++    if request.param == "memory":
++        return MemoryCache(max_entries=3)
++    return build_cache(None, client=fakeredis.FakeAsyncRedis())
++
++
++async def test_set_get_delete(cache: Cache) -> None:
++    assert await cache.get("k") is None
++    await cache.set("k", "v", 10)
++    assert await cache.get("k") == "v"
++    await cache.delete("k", "missing")
++    assert await cache.get("k") is None
++    assert await cache.ping()
++
++
++async def test_entries_expire(cache: Cache) -> None:
++    await cache.set("short", "v", 0.05)
++    await asyncio.sleep(0.12)
++    assert await cache.get("short") is None
++
++
++async def test_memory_cache_evicts_least_recently_used() -> None:
++    cache = MemoryCache(max_entries=2)
++    await cache.set("a", "1", 60)
++    await cache.set("b", "2", 60)
++    assert await cache.get("a") == "1"  # a is now most recent
++    await cache.set("c", "3", 60)
++    assert await cache.get("b") is None
++    assert await cache.get("a") == "1"
++    assert len(cache) == 2
++    await cache.close()
++    assert len(cache) == 0
++
++
++async def test_redis_cache_uses_prefix_and_closes() -> None:
++    client = fakeredis.FakeAsyncRedis()
++    cache = RedisCache(client, prefix="p:")
++    await cache.set("x", "y", 5)
++    assert await client.get("p:x") == b"y"
++    await cache.close()
++
++
++def test_build_cache_selects_backend() -> None:
++    assert build_cache(None).backend == "memory"
++    assert build_cache("redis://localhost:6399/0").backend == "redis"
+diff --git a/tests/service/test_enterprise.py b/tests/service/test_enterprise.py
+new file mode 100644
+index 0000000..e8002cb
+--- /dev/null
++++ b/tests/service/test_enterprise.py
+@@ -0,0 +1,180 @@
++# lineage: REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
++"""Caching, rate limiting, metrics and readiness wired into the running app."""
++
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
++from typing import Any
++
++import fakeredis
++import pytest
++from fastapi import FastAPI
++from httpx import ASGITransport, AsyncClient
++
++from service import app as app_module
++from service.app import create_app
++from service.config import Settings
++from service.repository import LinkRepository
++from tests.service.conftest import authed, issue_key
++
++
++@asynccontextmanager
++async def started(
++    settings: Settings, **overrides: Any
++) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
++    app = create_app(settings.model_copy(update=overrides))
++    async with app.router.lifespan_context(app):
++        if not app.state.settings.auth_enabled:
++            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
++                yield app, client
++            return
++        async with authed(app, await issue_key(app), "http://t") as client:
++            yield app, client
++
++
++def forbid_db_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
++    async def boom(self: LinkRepository, code: str) -> None:
++        raise AssertionError(f"database lookup for {code} should have been served from cache")
++
++    monkeypatch.setattr(LinkRepository, "get_by_code", boom)
++
++
++async def test_redirect_is_served_from_cache(
++    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/c"})).json()["code"]
++    assert (await client.get(f"/{code}")).status_code == 302  # miss -> populates cache
++    forbid_db_lookups(monkeypatch)
++    resp = await client.get(f"/{code}")
++    assert resp.status_code == 302
++    assert resp.headers["location"] == "https://e.com/c"
++
++
++async def test_cache_is_invalidated_on_update_and_delete(client: AsyncClient) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/i"})).json()["code"]
++    assert (await client.get(f"/{code}")).status_code == 302
++    await client.patch(f"/api/v1/links/{code}", json={"disabled": True})
++    assert (await client.get(f"/{code}")).status_code == 410
++    await client.patch(f"/api/v1/links/{code}", json={"disabled": False})
++    assert (await client.get(f"/{code}")).status_code == 302
++    await client.delete(f"/api/v1/links/{code}")
++    assert (await client.get(f"/{code}")).status_code == 410
++
++
++async def test_unknown_codes_are_negatively_cached_and_cleared_on_create(
++    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    assert (await client.get("/later-alias")).status_code == 404
++    created = await client.post(
++        "/api/v1/links", json={"url": "https://e.com/n", "custom_alias": "later-alias"}
++    )
++    assert created.status_code == 201
++    assert (await client.get("/later-alias")).status_code == 302  # marker was invalidated
++    assert (await client.get("/never-exists")).status_code == 404
++    forbid_db_lookups(monkeypatch)
++    assert (await client.get("/never-exists")).status_code == 404  # served from the negative cache
++
++
++async def test_alias_case_variants_share_the_canonical_entry(client: AsyncClient) -> None:
++    await client.post("/api/v1/links", json={"url": "https://e.com/p", "custom_alias": "Promo"})
++    assert (await client.get("/Promo")).status_code == 302
++    await client.patch("/api/v1/links/promo", json={"disabled": True})
++    assert (await client.get("/PROMO")).status_code == 410  # no stale variant entry
++
++
++async def test_rate_limit_returns_429_with_retry_after(settings: Settings) -> None:
++    async with started(
++        settings, rate_limit_write_capacity=2, rate_limit_write_refill_per_s=0.01
++    ) as (_app, c):
++        statuses = [
++            (await c.post("/api/v1/links", json={"url": f"https://e.com/{i}"})).status_code
++            for i in range(3)
++        ]
++        assert statuses == [201, 201, 429]
++        limited = await c.post("/api/v1/links", json={"url": "https://e.com/x"})
++        assert limited.json()["error"]["code"] == "rate_limited"
++        assert int(limited.headers["Retry-After"]) >= 1
++        assert limited.headers["X-RateLimit-Limit"] == "2"
++        body = (await c.get("/metrics")).text
++        assert 'rate_limited_total{scope="write"} 2.0' in body
++
++
++async def test_redirects_are_rate_limited_per_client(settings: Settings) -> None:
++    async with started(
++        settings, rate_limit_redirect_capacity=2, rate_limit_redirect_refill_per_s=0.01
++    ) as (app, c):
++        code = (await c.post("/api/v1/links", json={"url": "https://e.com/r"})).json()["code"]
++        assert [(await c.get(f"/{code}")).status_code for _ in range(3)] == [302, 302, 429]
++        other = AsyncClient(
++            transport=ASGITransport(app=app, client=("198.51.100.9", 1)), base_url="http://t"
++        )
++        async with other:
++            assert (await other.get(f"/{code}")).status_code == 302
++
++
++async def test_metrics_endpoint_exposes_counters(client: AsyncClient) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/m"})).json()["code"]
++    await client.get(f"/{code}")
++    await client.get(f"/{code}")
++    resp = await client.get("/metrics")
++    assert resp.status_code == 200
++    body = resp.text
++    assert 'redirects_total{outcome="ok"} 2.0' in body
++    assert 'link_cache_requests_total{result="hit"} 1.0' in body
++    assert 'link_cache_requests_total{result="miss"} 1.0' in body
++    assert 'http_requests_total{method="GET",route="/{code}",status="302"} 2.0' in body
++    assert "analytics_queue_depth" in body
++
++
++async def test_readyz_reports_cache_and_fails_when_it_is_down(
++    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    ok = await client.get("/readyz")
++    assert ok.json()["checks"] == {"database": "ok", "cache:memory": "ok"}
++
++    async def down() -> bool:
++        raise ConnectionError("cache unreachable")
++
++    monkeypatch.setattr(app.state.cache, "ping", down)
++    resp = await client.get("/readyz")
++    assert resp.status_code == 503
++    assert resp.json()["checks"]["cache:memory"] == "unavailable"
++
++
++async def test_cache_outage_degrades_to_database(
++    app: FastAPI, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/o"})).json()["code"]
++
++    async def broken(*args: object) -> None:
++        raise ConnectionError("redis down")
++
++    for name in ("get", "set", "delete"):
++        monkeypatch.setattr(app.state.cache, name, broken)
++    assert (await client.get(f"/{code}")).status_code == 302
++    assert (await client.patch(f"/api/v1/links/{code}", json={"disabled": True})).status_code == 200
++    assert (await client.get(f"/{code}")).status_code == 410
++
++
++async def test_redis_backed_cache_and_limits(
++    settings: Settings, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    fake = fakeredis.FakeAsyncRedis()
++    monkeypatch.setattr(app_module, "redis_client", lambda url: fake)
++    async with started(
++        settings, redis_url="redis://cache:6379/0", rate_limit_redirect_capacity=3
++    ) as (app, c):
++        assert app.state.cache.backend == "redis"
++        code = (await c.post("/api/v1/links", json={"url": "https://e.com/redis"})).json()["code"]
++        assert [(await c.get(f"/{code}")).status_code for _ in range(4)] == [302, 302, 302, 429]
++        assert await fake.get(f"shortener:link:{code}") is not None
++        assert (await c.get("/readyz")).json()["checks"]["cache:redis"] == "ok"
++
++
++async def test_features_can_be_disabled(settings: Settings) -> None:
++    async with started(
++        settings, cache_enabled=False, rate_limit_enabled=False, metrics_enabled=False
++    ) as (app, c):
++        code = (await c.post("/api/v1/links", json={"url": "https://e.com/off"})).json()["code"]
++        assert (await c.get(f"/{code}")).status_code == 302
++        assert app.state.cache is None
++        assert (await c.get("/metrics")).status_code in (404, 410)
+diff --git a/tests/service/test_health.py b/tests/service/test_health.py
+index bb79fa6..03ca9c0 100644
+--- a/tests/service/test_health.py
++++ b/tests/service/test_health.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
+ import json
+ import logging
+ 
+@@ -29,7 +29,8 @@ async def test_readiness_ok_and_failing_database(
+     monkeypatch.setattr(Database, "ping", broken)
+     resp = await client.get("/readyz")
+     assert resp.status_code == 503
+-    assert resp.json() == {"status": "not_ready", "checks": {"database": "unavailable"}}
++    assert resp.json()["status"] == "not_ready"
++    assert resp.json()["checks"]["database"] == "unavailable"
+ 
+ 
+ async def test_security_headers_and_request_id(client: AsyncClient) -> None:
+diff --git a/tests/service/test_metrics.py b/tests/service/test_metrics.py
+new file mode 100644
+index 0000000..ebf742f
+--- /dev/null
++++ b/tests/service/test_metrics.py
+@@ -0,0 +1,41 @@
++# lineage: REQ-AMBIGUOUS / implement.metrics (see runs/ for the decision trail)
++from fastapi import FastAPI
++from httpx import ASGITransport, AsyncClient
++
++from service.metrics import Metrics, MetricsMiddleware, router
++
++
++def build() -> tuple[FastAPI, Metrics]:
++    app = FastAPI()
++    metrics = Metrics()
++    app.state.metrics = metrics
++    app.add_middleware(MetricsMiddleware, metrics=metrics)
++
++    @app.get("/items/{item_id}")
++    async def item(item_id: str) -> dict[str, str]:
++        return {"id": item_id}
++
++    app.include_router(router)
++    return app, metrics
++
++
++async def test_requests_are_counted_by_route_template() -> None:
++    app, _ = build()
++    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
++        for i in range(3):
++            assert (await c.get(f"/items/{i}")).status_code == 200
++        assert (await c.get("/nope")).status_code == 404
++        body = (await c.get("/metrics")).text
++    assert 'http_requests_total{method="GET",route="/items/{item_id}",status="200"} 3.0' in body
++    assert 'route="unmatched",status="404"' in body
++    assert "http_request_duration_seconds_bucket" in body
++    assert "/items/0" not in body  # no per-id cardinality
++
++
++async def test_registries_are_isolated_and_gauges_bind() -> None:
++    a, b = Metrics(), Metrics()
++    a.redirects.labels("ok").inc()
++    a.bind_gauge(a.analytics_queue, lambda: 7)
++    assert b"redirects_total" in a.render()
++    assert b'redirects_total{outcome="ok"} 1.0' not in b.render()
++    assert b"analytics_queue_depth 7.0" in a.render()
+diff --git a/tests/service/test_ratelimit.py b/tests/service/test_ratelimit.py
+new file mode 100644
+index 0000000..5c4a3e6
+--- /dev/null
++++ b/tests/service/test_ratelimit.py
+@@ -0,0 +1,59 @@
++# lineage: REQ-AMBIGUOUS / implement.rate_limiter (see runs/ for the decision trail)
++import asyncio
++
++import fakeredis
++import pytest
++
++from service.ratelimit import MemoryRateLimiter, RateLimitedError, RedisRateLimiter, enforce
++
++
++@pytest.fixture(params=["memory", "redis"])
++def limiter_factory(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
++    def make(capacity: int, rate: float):  # type: ignore[no-untyped-def]
++        if request.param == "memory":
++            return MemoryRateLimiter(capacity, rate)
++        return RedisRateLimiter(fakeredis.FakeAsyncRedis(), capacity, rate)
++
++    return make
++
++
++async def test_bucket_allows_burst_then_limits(limiter_factory) -> None:  # type: ignore[no-untyped-def]
++    limiter = limiter_factory(3, 0.5)
++    results = [await limiter.hit("client") for _ in range(4)]
++    assert [r.allowed for r in results] == [True, True, True, False]
++    assert results[0].remaining == 2
++    blocked = results[-1]
++    assert blocked.retry_after_s > 0
++    assert blocked.headers()["Retry-After"] == "2"
++    assert blocked.headers()["X-RateLimit-Limit"] == "3"
++
++
++async def test_buckets_are_independent_per_key(limiter_factory) -> None:  # type: ignore[no-untyped-def]
++    limiter = limiter_factory(1, 0.1)
++    assert (await limiter.hit("a")).allowed
++    assert (await limiter.hit("b")).allowed
++    assert not (await limiter.hit("a")).allowed
++
++
++async def test_tokens_refill_over_time(limiter_factory) -> None:  # type: ignore[no-untyped-def]
++    limiter = limiter_factory(1, 20.0)
++    assert (await limiter.hit("k")).allowed
++    assert not (await limiter.hit("k")).allowed
++    await asyncio.sleep(0.1)
++    assert (await limiter.hit("k")).allowed
++
++
++async def test_enforce_raises_429_with_headers() -> None:
++    limiter = MemoryRateLimiter(1, 0.01)
++    await enforce(limiter, "x")
++    with pytest.raises(RateLimitedError) as exc:
++        await enforce(limiter, "x")
++    assert exc.value.status_code == 429
++    assert "Retry-After" in exc.value.headers
++
++
++async def test_memory_limiter_bounds_its_key_space() -> None:
++    limiter = MemoryRateLimiter(5, 1.0, max_keys=10)
++    for i in range(50):
++        await limiter.hit(f"k{i}")
++    assert len(limiter._buckets) == 10
+diff --git a/tests/service/test_schema_v3.py b/tests/service/test_schema_v3.py
+new file mode 100644
+index 0000000..89e7712
+--- /dev/null
++++ b/tests/service/test_schema_v3.py
+@@ -0,0 +1,34 @@
++# lineage: REQ-AMBIGUOUS / implement.auth_migration (see runs/ for the decision trail)
++"""Migration 0003 adds api_keys and links.owner_key_id, and reverses cleanly."""
++
++from pathlib import Path
++
++from alembic import command
++from alembic.config import Config
++from sqlalchemy import create_engine, inspect
++
++from service.db import ALEMBIC_INI
++
++
++def test_migration_0003_upgrade_and_downgrade(tmp_path: Path) -> None:
++    db = tmp_path / "v3.db"
++    cfg = Config(str(ALEMBIC_INI))
++    cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db}")
++    command.upgrade(cfg, "0003")
++    engine = create_engine(f"sqlite:///{db}")
++    insp = inspect(engine)
++    assert {c["name"] for c in insp.get_columns("api_keys")} == {
++        "id",
++        "name",
++        "prefix",
++        "key_hash",
++        "created_at",
++        "revoked_at",
++    }
++    assert "owner_key_id" in {c["name"] for c in insp.get_columns("links")}
++    assert any(fk["referred_table"] == "api_keys" for fk in insp.get_foreign_keys("links"))
++    command.downgrade(cfg, "0002")
++    insp = inspect(engine)
++    assert "api_keys" not in insp.get_table_names()
++    assert "owner_key_id" not in {c["name"] for c in insp.get_columns("links")}
++    engine.dispose()
+diff --git a/tests/service/test_stats_api.py b/tests/service/test_stats_api.py
+index e268f8c..5a2059a 100644
+--- a/tests/service/test_stats_api.py
++++ b/tests/service/test_stats_api.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-BF-002 / test.analytics (see runs/ for the decision trail)
++# lineage: REQ-BF-002 / test.analytics, REQ-AMBIGUOUS / implement.api_key_auth
+ """Stats endpoint end-to-end, and proof that analytics failures never break a redirect."""
+ 
+ from collections.abc import AsyncIterator
+@@ -96,13 +96,11 @@ async def test_analytics_failure_never_breaks_redirect(
+ async def test_redirect_works_with_analytics_disabled(settings: object) -> None:
+     from service.app import create_app
+     from service.config import Settings
++    from tests.service.conftest import authed, issue_key
+ 
+     assert isinstance(settings, Settings)
+     app = create_app(settings.model_copy(update={"analytics_enabled": False}))
+-    async with (
+-        app.router.lifespan_context(app),
+-        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+-    ):
++    async with app.router.lifespan_context(app), authed(app, await issue_key(app), "http://t") as c:
+         code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+         assert (await c.get(f"/{code}")).status_code == 302
+         assert app.state.recorder is None

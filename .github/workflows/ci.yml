@@ -27,6 +27,8 @@ jobs:
         run: make test
       - name: Security (bandit + pip-audit)
         run: make security
+      - name: Requirement mapping references exist
+        run: make verify-mapping
       - name: Audit chains of committed runs
         run: |
           for d in runs/*/; do

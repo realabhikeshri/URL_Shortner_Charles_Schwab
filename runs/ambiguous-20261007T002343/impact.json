@@ -1,0 +1,871 @@
+{
+  "modules": [
+    "service",
+    "service.analytics",
+    "service.api",
+    "service.api.deps",
+    "service.api.health",
+    "service.api.links",
+    "service.api.middleware",
+    "service.api.redirect",
+    "service.api.stats",
+    "service.app",
+    "service.config",
+    "service.db",
+    "service.domain",
+    "service.domain.codes",
+    "service.domain.urls",
+    "service.errors",
+    "service.links",
+    "service.migrations",
+    "service.migrations.env",
+    "service.migrations.versions",
+    "service.migrations.versions.rev_0001_initial",
+    "service.migrations.versions.rev_0002_clicks_and_expiry",
+    "service.models",
+    "service.observability",
+    "service.repository",
+    "service.schemas"
+  ],
+  "seeds": [
+    "service",
+    "service.api",
+    "service.api.health"
+  ],
+  "impacted_modules": [
+    "service",
+    "service.api",
+    "service.api.health",
+    "service.app",
+    "service.migrations.env"
+  ],
+  "impacted_routes": [
+    "GET /healthz",
+    "GET /readyz"
+  ],
+  "route_source": "fastapi",
+  "routed_modules": [
+    "service.api.health",
+    "service.api.links",
+    "service.api.redirect",
+    "service.api.stats"
+  ],
+  "tables": {
+    "links": [
+      "id",
+      "code",
+      "target_url",
+      "is_custom",
+      "tags",
+      "disabled",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+      "idempotency_key",
+      "request_fingerprint",
+      "expires_at"
+    ],
+    "clicks": [
+      "id",
+      "link_id",
+      "occurred_at",
+      "day",
+      "visitor_hash",
+      "referrer_host",
+      "ua_family"
+    ]
+  },
+  "tables_touched": [],
+  "migrations_needed": false,
+  "tests_to_update": [
+    "tests.service.conftest",
+    "tests.service.test_api_links",
+    "tests.service.test_health",
+    "tests.service.test_integration",
+    "tests.service.test_stats_api"
+  ],
+  "blast_radius": 0.182,
+  "symbols_indexed": 117,
+  "errors": [],
+  "narrative": {
+    "summary": "5 of 26 modules impacted, 2 routes, blast radius 0.18.",
+    "risk": "low",
+    "recommendations": [
+      "Re-run and update 5 impacted test modules.",
+      "Public routes are touched: keep existing contracts backward compatible."
+    ]
+  },
+  "symbol_index": {
+    "service": [],
+    "service.analytics": [
+      {
+        "name": "ClickEvent",
+        "kind": "class",
+        "line": 46
+      },
+      {
+        "name": "daily_salt",
+        "kind": "function",
+        "line": 54
+      },
+      {
+        "name": "visitor_hash",
+        "kind": "function",
+        "line": 58
+      },
+      {
+        "name": "ua_family",
+        "kind": "function",
+        "line": 63
+      },
+      {
+        "name": "referrer_host",
+        "kind": "function",
+        "line": 71
+      },
+      {
+        "name": "ClickRecorder",
+        "kind": "class",
+        "line": 78
+      },
+      {
+        "name": "ClickRecorder.__init__",
+        "kind": "method",
+        "line": 79
+      },
+      {
+        "name": "ClickRecorder.record",
+        "kind": "method",
+        "line": 100
+      },
+      {
+        "name": "ClickRecorder.start",
+        "kind": "method",
+        "line": 109
+      },
+      {
+        "name": "ClickRecorder.stop",
+        "kind": "method",
+        "line": 116
+      },
+      {
+        "name": "ClickRecorder.flush",
+        "kind": "method",
+        "line": 125
+      },
+      {
+        "name": "ClickRecorder._writer",
+        "kind": "method",
+        "line": 129
+      },
+      {
+        "name": "ClickRecorder._persist",
+        "kind": "method",
+        "line": 146
+      },
+      {
+        "name": "ClickRecorder._purger",
+        "kind": "method",
+        "line": 162
+      },
+      {
+        "name": "ClickRecorder._purge_once",
+        "kind": "method",
+        "line": 167
+      },
+      {
+        "name": "ClickRecorder.purge_expired",
+        "kind": "method",
+        "line": 175
+      },
+      {
+        "name": "link_stats",
+        "kind": "function",
+        "line": 183
+      }
+    ],
+    "service.api": [],
+    "service.api.deps": [
+      {
+        "name": "get_settings",
+        "kind": "function",
+        "line": 15
+      },
+      {
+        "name": "get_database",
+        "kind": "function",
+        "line": 20
+      },
+      {
+        "name": "get_session",
+        "kind": "function",
+        "line": 25
+      },
+      {
+        "name": "get_link_service",
+        "kind": "function",
+        "line": 30
+      }
+    ],
+    "service.api.health": [
+      {
+        "name": "healthz",
+        "kind": "function",
+        "line": 18
+      },
+      {
+        "name": "readyz",
+        "kind": "function",
+        "line": 23
+      }
+    ],
+    "service.api.links": [
+      {
+        "name": "create_link",
+        "kind": "function",
+        "line": 17
+      },
+      {
+        "name": "get_link",
+        "kind": "function",
+        "line": 31
+      },
+      {
+        "name": "update_link",
+        "kind": "function",
+        "line": 36
+      },
+      {
+        "name": "delete_link",
+        "kind": "function",
+        "line": 41
+      }
+    ],
+    "service.api.middleware": [
+      {
+        "name": "RequestContextMiddleware",
+        "kind": "class",
+        "line": 19
+      },
+      {
+        "name": "RequestContextMiddleware.__init__",
+        "kind": "method",
+        "line": 26
+      },
+      {
+        "name": "RequestContextMiddleware.__call__",
+        "kind": "method",
+        "line": 29
+      },
+      {
+        "name": "SecurityHeadersMiddleware",
+        "kind": "class",
+        "line": 73
+      },
+      {
+        "name": "SecurityHeadersMiddleware.__init__",
+        "kind": "method",
+        "line": 74
+      },
+      {
+        "name": "SecurityHeadersMiddleware.__call__",
+        "kind": "method",
+        "line": 78
+      },
+      {
+        "name": "BodySizeLimitMiddleware",
+        "kind": "class",
+        "line": 98
+      },
+      {
+        "name": "BodySizeLimitMiddleware.__init__",
+        "kind": "method",
+        "line": 101
+      },
+      {
+        "name": "BodySizeLimitMiddleware.__call__",
+        "kind": "method",
+        "line": 105
+      },
+      {
+        "name": "BodySizeLimitMiddleware._reject",
+        "kind": "method",
+        "line": 127
+      }
+    ],
+    "service.api.redirect": [
+      {
+        "name": "record_click",
+        "kind": "function",
+        "line": 19
+      },
+      {
+        "name": "follow",
+        "kind": "function",
+        "line": 44
+      }
+    ],
+    "service.api.stats": [
+      {
+        "name": "DayStats",
+        "kind": "class",
+        "line": 16
+      },
+      {
+        "name": "Referrer",
+        "kind": "class",
+        "line": 22
+      },
+      {
+        "name": "UserAgentFamily",
+        "kind": "class",
+        "line": 27
+      },
+      {
+        "name": "LinkStats",
+        "kind": "class",
+        "line": 32
+      },
+      {
+        "name": "stats",
+        "kind": "function",
+        "line": 43
+      }
+    ],
+    "service.app": [
+      {
+        "name": "create_app",
+        "kind": "function",
+        "line": 26
+      }
+    ],
+    "service.config": [
+      {
+        "name": "Settings",
+        "kind": "class",
+        "line": 12
+      },
+      {
+        "name": "Settings._strip_trailing_slash",
+        "kind": "method",
+        "line": 47
+      },
+      {
+        "name": "Settings._coerce_status",
+        "kind": "method",
+        "line": 52
+      },
+      {
+        "name": "get_settings",
+        "kind": "function",
+        "line": 58
+      }
+    ],
+    "service.db": [
+      {
+        "name": "Base",
+        "kind": "class",
+        "line": 24
+      },
+      {
+        "name": "UTCDateTime",
+        "kind": "class",
+        "line": 28
+      },
+      {
+        "name": "UTCDateTime.process_bind_param",
+        "kind": "method",
+        "line": 34
+      },
+      {
+        "name": "UTCDateTime.process_result_value",
+        "kind": "method",
+        "line": 41
+      },
+      {
+        "name": "utcnow",
+        "kind": "function",
+        "line": 47
+      },
+      {
+        "name": "Database",
+        "kind": "class",
+        "line": 51
+      },
+      {
+        "name": "Database.__init__",
+        "kind": "method",
+        "line": 52
+      },
+      {
+        "name": "Database.session",
+        "kind": "method",
+        "line": 62
+      },
+      {
+        "name": "Database.ping",
+        "kind": "method",
+        "line": 65
+      },
+      {
+        "name": "Database.dispose",
+        "kind": "method",
+        "line": 70
+      },
+      {
+        "name": "run_migrations",
+        "kind": "function",
+        "line": 74
+      },
+      {
+        "name": "migrate",
+        "kind": "function",
+        "line": 81
+      }
+    ],
+    "service.domain": [],
+    "service.domain.codes": [
+      {
+        "name": "AliasError",
+        "kind": "class",
+        "line": 37
+      },
+      {
+        "name": "encode",
+        "kind": "function",
+        "line": 41
+      },
+      {
+        "name": "decode",
+        "kind": "function",
+        "line": 53
+      },
+      {
+        "name": "generate_code",
+        "kind": "function",
+        "line": 64
+      },
+      {
+        "name": "collision_probability",
+        "kind": "function",
+        "line": 69
+      },
+      {
+        "name": "normalize_alias",
+        "kind": "function",
+        "line": 74
+      }
+    ],
+    "service.domain.urls": [
+      {
+        "name": "UrlError",
+        "kind": "class",
+        "line": 19
+      },
+      {
+        "name": "_is_forbidden_ip",
+        "kind": "function",
+        "line": 23
+      },
+      {
+        "name": "normalize_url",
+        "kind": "function",
+        "line": 38
+      }
+    ],
+    "service.errors": [
+      {
+        "name": "AppError",
+        "kind": "class",
+        "line": 16
+      },
+      {
+        "name": "AppError.__init__",
+        "kind": "method",
+        "line": 20
+      },
+      {
+        "name": "NotFoundError",
+        "kind": "class",
+        "line": 26
+      },
+      {
+        "name": "GoneError",
+        "kind": "class",
+        "line": 31
+      },
+      {
+        "name": "ConflictError",
+        "kind": "class",
+        "line": 36
+      },
+      {
+        "name": "InvalidInputError",
+        "kind": "class",
+        "line": 41
+      },
+      {
+        "name": "PayloadTooLargeError",
+        "kind": "class",
+        "line": 46
+      },
+      {
+        "name": "error_body",
+        "kind": "function",
+        "line": 51
+      },
+      {
+        "name": "error_response",
+        "kind": "function",
+        "line": 58
+      },
+      {
+        "name": "install_error_handlers",
+        "kind": "function",
+        "line": 80
+      }
+    ],
+    "service.links": [
+      {
+        "name": "is_expired",
+        "kind": "function",
+        "line": 24
+      },
+      {
+        "name": "validate_expiry",
+        "kind": "function",
+        "line": 28
+      },
+      {
+        "name": "fingerprint",
+        "kind": "function",
+        "line": 38
+      },
+      {
+        "name": "LinkService",
+        "kind": "class",
+        "line": 43
+      },
+      {
+        "name": "LinkService.__init__",
+        "kind": "method",
+        "line": 44
+      },
+      {
+        "name": "LinkService.to_out",
+        "kind": "method",
+        "line": 49
+      },
+      {
+        "name": "LinkService.create",
+        "kind": "method",
+        "line": 63
+      },
+      {
+        "name": "LinkService._replay",
+        "kind": "method",
+        "line": 127
+      },
+      {
+        "name": "LinkService.resolve",
+        "kind": "method",
+        "line": 135
+      },
+      {
+        "name": "LinkService.get",
+        "kind": "method",
+        "line": 146
+      },
+      {
+        "name": "LinkService.update",
+        "kind": "method",
+        "line": 152
+      },
+      {
+        "name": "LinkService.delete",
+        "kind": "method",
+        "line": 162
+      }
+    ],
+    "service.migrations": [],
+    "service.migrations.env": [
+      {
+        "name": "database_url",
+        "kind": "function",
+        "line": 23
+      },
+      {
+        "name": "do_run_migrations",
+        "kind": "function",
+        "line": 31
+      },
+      {
+        "name": "run_async_migrations",
+        "kind": "function",
+        "line": 42
+      },
+      {
+        "name": "run_migrations_offline",
+        "kind": "function",
+        "line": 49
+      }
+    ],
+    "service.migrations.versions": [],
+    "service.migrations.versions.rev_0001_initial": [
+      {
+        "name": "upgrade",
+        "kind": "function",
+        "line": 20
+      },
+      {
+        "name": "downgrade",
+        "kind": "function",
+        "line": 39
+      }
+    ],
+    "service.migrations.versions.rev_0002_clicks_and_expiry": [
+      {
+        "name": "upgrade",
+        "kind": "function",
+        "line": 20
+      },
+      {
+        "name": "downgrade",
+        "kind": "function",
+        "line": 42
+      }
+    ],
+    "service.models": [
+      {
+        "name": "Link",
+        "kind": "class",
+        "line": 12
+      },
+      {
+        "name": "Click",
+        "kind": "class",
+        "line": 29
+      }
+    ],
+    "service.observability": [
+      {
+        "name": "JsonFormatter",
+        "kind": "class",
+        "line": 16
+      },
+      {
+        "name": "JsonFormatter.format",
+        "kind": "method",
+        "line": 17
+      },
+      {
+        "name": "configure_logging",
+        "kind": "function",
+        "line": 33
+      },
+      {
+        "name": "get_logger",
+        "kind": "function",
+        "line": 45
+      }
+    ],
+    "service.repository": [
+      {
+        "name": "LinkRepository",
+        "kind": "class",
+        "line": 10
+      },
+      {
+        "name": "LinkRepository.__init__",
+        "kind": "method",
+        "line": 11
+      },
+      {
+        "name": "LinkRepository.get_by_code",
+        "kind": "method",
+        "line": 14
+      },
+      {
+        "name": "LinkRepository.code_exists",
+        "kind": "method",
+        "line": 29
+      },
+      {
+        "name": "LinkRepository.alias_taken",
+        "kind": "method",
+        "line": 33
+      },
+      {
+        "name": "LinkRepository.get_by_idempotency_key",
+        "kind": "method",
+        "line": 39
+      },
+      {
+        "name": "LinkRepository.add",
+        "kind": "method",
+        "line": 43
+      }
+    ],
+    "service.schemas": [
+      {
+        "name": "LinkCreate",
+        "kind": "class",
+        "line": 12
+      },
+      {
+        "name": "LinkUpdate",
+        "kind": "class",
+        "line": 23
+      },
+      {
+        "name": "LinkUpdate._not_empty",
+        "kind": "method",
+        "line": 30
+      },
+      {
+        "name": "LinkOut",
+        "kind": "class",
+        "line": 36
+      }
+    ]
+  },
+  "test_map": {
+    "tests": [],
+    "tests.service": [],
+    "tests.service.conftest": [
+      "service.app",
+      "service.app.create_app",
+      "service.config",
+      "service.config.Settings",
+      "service.db",
+      "service.db.run_migrations"
+    ],
+    "tests.service.test_analytics_unit": [
+      "service.analytics",
+      "service.analytics.ClickEvent",
+      "service.analytics.ClickRecorder",
+      "service.analytics.referrer_host",
+      "service.analytics.ua_family",
+      "service.analytics.visitor_hash",
+      "service.models",
+      "service.models.Click",
+      "service.models.Link"
+    ],
+    "tests.service.test_api_links": [
+      "service.app",
+      "service.app.create_app",
+      "service.config",
+      "service.config.Settings"
+    ],
+    "tests.service.test_codes": [
+      "service.domain.codes",
+      "service.domain.codes.ALPHABET",
+      "service.domain.codes.AliasError",
+      "service.domain.codes.collision_probability",
+      "service.domain.codes.decode",
+      "service.domain.codes.encode",
+      "service.domain.codes.generate_code",
+      "service.domain.codes.normalize_alias"
+    ],
+    "tests.service.test_expiry": [
+      "service.models",
+      "service.models.Link"
+    ],
+    "tests.service.test_health": [
+      "service.app",
+      "service.app.create_app",
+      "service.config",
+      "service.config.Settings",
+      "service.db",
+      "service.db.Database",
+      "service.observability",
+      "service.observability.JsonFormatter",
+      "service.observability.request_id_var"
+    ],
+    "tests.service.test_integration": [
+      "service",
+      "service.db",
+      "service.db.ALEMBIC_INI",
+      "service.links",
+      "service.models",
+      "service.models.Link"
+    ],
+    "tests.service.test_properties": [
+      "service.domain.codes",
+      "service.domain.codes.ALPHABET",
+      "service.domain.codes.AliasError",
+      "service.domain.codes.decode",
+      "service.domain.codes.encode",
+      "service.domain.codes.normalize_alias",
+      "service.domain.urls",
+      "service.domain.urls.UrlError",
+      "service.domain.urls.normalize_url"
+    ],
+    "tests.service.test_regression_alias_case": [],
+    "tests.service.test_schema_v2": [
+      "service.db",
+      "service.db.ALEMBIC_INI"
+    ],
+    "tests.service.test_stats_api": [
+      "service.app",
+      "service.app.create_app",
+      "service.config",
+      "service.config.Settings"
+    ],
+    "tests.service.test_urls": [
+      "service.domain.urls",
+      "service.domain.urls.UrlError",
+      "service.domain.urls.normalize_url"
+    ]
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "endpoint": "service.api.health.healthz",
+      "summary": "Liveness probe"
+    },
+    {
+      "method": "GET",
+      "path": "/readyz",
+      "endpoint": "service.api.health.readyz",
+      "summary": "Readiness probe (database reachable)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/links",
+      "endpoint": "service.api.links.create_link",
+      "summary": "create link"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/links/{code}",
+      "endpoint": "service.api.links.get_link",
+      "summary": "get link"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/links/{code}",
+      "endpoint": "service.api.links.update_link",
+      "summary": "update link"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/links/{code}",
+      "endpoint": "service.api.links.delete_link",
+      "summary": "delete link"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/links/{code}/stats",
+      "endpoint": "service.api.stats.stats",
+      "summary": "Click statistics"
+    },
+    {
+      "method": "GET",
+      "path": "/{code}",
+      "endpoint": "service.api.redirect.follow",
+      "summary": "follow"
+    }
+  ]
+}

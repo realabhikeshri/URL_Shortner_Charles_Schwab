@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
 
+    @field_validator("redirect_status_code", mode="before")
+    @classmethod
+    def _coerce_status(cls, value: object) -> object:
+        # Environment variables arrive as strings; Literal[302, 307] needs an int.
+        return int(value) if isinstance(value, str) and value.strip().isdigit() else value
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

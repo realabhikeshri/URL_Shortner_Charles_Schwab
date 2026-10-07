@@ -1,0 +1,220 @@
+[
+  {
+    "decision_id": "D-3ca2326ada",
+    "node_id": "requirement",
+    "agent": "human",
+    "inputs_hash": "2ae677c449725bcab6b850bbff360b25f5fcab3dbd38b5a92cfdf07b5ab6ae30",
+    "rationale": "Requirement of record: greenfield.yaml",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:09.442139Z",
+    "parent_decision_ids": [],
+    "outcome": "accepted for processing"
+  },
+  {
+    "decision_id": "D-b98c1bcac0",
+    "node_id": "intake",
+    "agent": "RequirementAnalyst",
+    "inputs_hash": "773dc83f03e2da65563571815ba0881ecb0982db1fa97c43df9af1348ed908a8",
+    "rationale": "Capabilities ['core']. Ambiguities: none. Assumptions: 0.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:09.534396Z",
+    "parent_decision_ids": [
+      "D-3ca2326ada"
+    ],
+    "outcome": "REQ-GF-001: 5 functional reqs, 8 acceptance criteria, ambiguity 0.0, risk medium"
+  },
+  {
+    "decision_id": "D-73fa9d83c4",
+    "node_id": "analysis.impact",
+    "agent": "CodebaseAnalyst",
+    "inputs_hash": "b411d5a47ab7dd11d21fbdaf62f8fdcdee5b973651b76ad72366918084846e02",
+    "rationale": "Seeds [] -> 0 impacted modules via the reverse import graph; routes from none; migrations_needed=False; blast radius 0.0.",
+    "alternatives_considered": [
+      "grep-based impact estimate (cheaper, misses transitive importers)"
+    ],
+    "timestamp": "2026-10-07T00:23:09.541943Z",
+    "parent_decision_ids": [
+      "D-b98c1bcac0"
+    ],
+    "outcome": "Empty workspace: greenfield build, no existing code is impacted."
+  },
+  {
+    "decision_id": "D-96b5ac8fd7",
+    "node_id": "plan",
+    "agent": "Planner",
+    "inputs_hash": "4e2d2bef303262a12d1a3ffceed3db64e7f42196366f85dbc6e246850b659cf6",
+    "rationale": "Capabilities ['core'] decomposed from the catalog. Independent work runs in parallel (implement.codes, implement.foundation, implement.urls); tests and docs branch after implementation and join at review; release waits for review.",
+    "alternatives_considered": [
+      "Single sequential pipeline: simpler, but slower and one failure stalls everything",
+      "One mega implement node: fewer gates, far larger blast radius per failure"
+    ],
+    "timestamp": "2026-10-07T00:23:09.552046Z",
+    "parent_decision_ids": [
+      "D-73fa9d83c4"
+    ],
+    "outcome": "plan with 11 nodes, risk medium"
+  },
+  {
+    "decision_id": "D-e701cb249a",
+    "node_id": "design.architecture",
+    "agent": "Architect",
+    "inputs_hash": "1ead64b05f1adac27964101c8a6c6333b3cf3825f60f848787d5d2cce890d21f",
+    "rationale": "302 by default (307 configurable): 301 is cached forever by browsers, breaking disable/delete and analytics; 7-char random base62 codes with bounded retry: 62^7 = 3.5e12; per-insert collision p = n/62^7; no central counter to coordinate; Soft delete + 410 Gone: keeps audit history and prevents silent alias re-use; Idempotency-Key stored on the link with a request fingerprint: simple, transactional, survives restarts",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:09.575093Z",
+    "parent_decision_ids": [
+      "D-96b5ac8fd7"
+    ],
+    "outcome": "design with 5 components, 4 decisions"
+  },
+  {
+    "decision_id": "D-c3c7ac7d23",
+    "node_id": "implement.foundation",
+    "agent": "Implementer",
+    "inputs_hash": "c21f301ab882c2572d20656abaaa842ceaf0bb81e38237dd7c7245d9efca17d7",
+    "rationale": "Everything the feature nodes share is built first so they can proceed in parallel: pydantic-settings config (12-factor, SHORTENER_ prefix), SQLAlchemy 2.0 async engine with a UTC-safe datetime type, Alembic migration 0001 (links table, unique code + idempotency key), JSON logging with request ids, a single error envelope, pure-ASGI middleware (request id, security headers, body size limit) and liveness/readiness probes. Test fixtures migrate a template DB once and copy it per test.",
+    "alternatives_considered": [
+      "Base.metadata.create_all instead of Alembic: rejected, schema history and reversible migrations are required",
+      "BaseHTTPMiddleware: rejected, pure ASGI avoids its known streaming/background-task pitfalls"
+    ],
+    "timestamp": "2026-10-07T00:23:09.657227Z",
+    "parent_decision_ids": [
+      "D-e701cb249a"
+    ],
+    "outcome": "Service foundation - settings, async DB layer, initial migration, logging, errors, middleware, health probes"
+  },
+  {
+    "decision_id": "D-f14413ca7d",
+    "node_id": "implement.codes",
+    "agent": "Implementer",
+    "inputs_hash": "a323cf06aee8e41805b2493c2dcea828e8279d9419364d09292fdc13722ea600",
+    "rationale": "7 random base62 characters give 62^7 = 3.5e12 codes; per-insert collision probability is n/62^7, so a bounded retry (5) plus the DB unique constraint is sufficient and avoids a central counter. Aliases are validated by regex (3-32 chars) and checked against reserved route names.",
+    "alternatives_considered": [
+      "Sequential ids encoded in base62: rejected, enumerable and leaks volume",
+      "Hash of the URL: rejected, same URL from different users would collide by design"
+    ],
+    "timestamp": "2026-10-07T00:23:11.749447Z",
+    "parent_decision_ids": [
+      "D-c3c7ac7d23"
+    ],
+    "outcome": "Base62 short-code generation (CSPRNG) and custom-alias validation with reserved words"
+  },
+  {
+    "decision_id": "D-1fc0a0fc87",
+    "node_id": "implement.urls",
+    "agent": "Implementer",
+    "inputs_hash": "a341aa5065d9163ff1d0e835118a3785c3db41e2b0aea85ea58dd23fb967865d",
+    "rationale": "Shorteners are abused for phishing and SSRF-style probing. Only http/https are accepted, embedded credentials are rejected, private/loopback/link-local IP literals and local host names are refused by default (configurable), and the URL is normalised so equivalent inputs store identically.",
+    "alternatives_considered": [
+      "Resolve DNS to block private targets: deferred, adds latency and is racy (DNS rebinding); documented"
+    ],
+    "timestamp": "2026-10-07T00:23:11.768724Z",
+    "parent_decision_ids": [
+      "D-c3c7ac7d23"
+    ],
+    "outcome": "Target URL validation and normalisation (http/https only, no private hosts, no credentials)"
+  },
+  {
+    "decision_id": "D-e7c75f3a76",
+    "node_id": "implement.links_api",
+    "agent": "Implementer",
+    "inputs_hash": "efec29e96aa11d171efc4591da488151bb6afcbed4697149652e39ecd248aa23",
+    "rationale": "LinkService holds the use cases; the repository isolates SQL. Create supports Idempotency-Key with a request fingerprint (replay returns the original link, misuse returns 409). Redirect returns 302 by default (307 configurable) with Cache-Control no-store so every click reaches the service. Custom aliases are stored in canonical lower case and alias conflicts are checked case-insensitively. NOTE (deliberate, documented): lookups use exact matching, so an alias created as 'MyLink' is not reachable at /MyLink. This is the seeded defect fixed by the brownfield scenario.",
+    "alternatives_considered": [
+      "301 redirects: rejected, browsers cache them permanently which breaks disable/delete and analytics"
+    ],
+    "timestamp": "2026-10-07T00:23:12.566301Z",
+    "parent_decision_ids": [
+      "D-f14413ca7d",
+      "D-1fc0a0fc87"
+    ],
+    "outcome": "Links API - create (idempotent), metadata, patch, soft delete, and the public redirect"
+  },
+  {
+    "decision_id": "D-1424ed6bdf",
+    "node_id": "test.properties",
+    "agent": "TestEngineer",
+    "inputs_hash": "91b6432d9f93ee6daea880cf94b54d9a4d2826c3eb521f913c5fbb05f00cb841",
+    "rationale": "Hypothesis explores input spaces that example tests miss (unicode, huge integers, odd schemes).",
+    "alternatives_considered": [
+      "Only example-based tests: rejected, weaker guarantees for parsers/encoders"
+    ],
+    "timestamp": "2026-10-07T00:23:13.350798Z",
+    "parent_decision_ids": [
+      "D-e7c75f3a76"
+    ],
+    "outcome": "Property-based tests for base62 round-trips, ordering, URL normalisation idempotence and scheme safety"
+  },
+  {
+    "decision_id": "D-5eb0442a97",
+    "node_id": "test.integration",
+    "agent": "TestEngineer",
+    "inputs_hash": "477f4eee7961e9c5d6e1a34184fd4dd3ac5752cba0c0c2b7d7ed7f623c875464",
+    "rationale": "Exercises the API end-to-end against a real migrated SQLite database, including the concurrency and retry paths that unit tests cannot reach, and proves migrations upgrade/downgrade cleanly.",
+    "alternatives_considered": [
+      "Mocks for the database: rejected, would not catch constraint/race behaviour"
+    ],
+    "timestamp": "2026-10-07T00:23:13.372277Z",
+    "parent_decision_ids": [
+      "D-e7c75f3a76"
+    ],
+    "outcome": "Integration tests - lifecycle, case-sensitive generated codes, collision retry, concurrency, idempotency races, migrations"
+  },
+  {
+    "decision_id": "D-d2b33e12e1",
+    "node_id": "document.architecture",
+    "agent": "DocWriter",
+    "inputs_hash": "6dfefe999f5ac13d3c2489f42b53a3bf505425efcea7ac2e7c3d9a207b2e16b2",
+    "rationale": "API reference and OpenAPI are generated from the running app, so they cannot drift from the code.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:13.732032Z",
+    "parent_decision_ids": [
+      "D-e7c75f3a76"
+    ],
+    "outcome": "docs for 7 routes; 5 changelog entries"
+  },
+  {
+    "decision_id": "D-85d4601c73",
+    "node_id": "test.coverage",
+    "agent": "TestEngineer",
+    "inputs_hash": "3cefaba1260377d138830e14ba95d7e42afacf4d1f0abb1a54676008df91a497",
+    "rationale": "Coverage is measured by the independent coverage gate, not self-reported.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:15.386648Z",
+    "parent_decision_ids": [
+      "D-e7c75f3a76",
+      "D-5eb0442a97",
+      "D-1424ed6bdf"
+    ],
+    "outcome": "82 tests collected across 6 modules"
+  },
+  {
+    "decision_id": "D-5d8bf040df",
+    "node_id": "review.code",
+    "agent": "Reviewer",
+    "inputs_hash": "1e252ad5c203b89cbbf796b0ac6ab2c7e38f8f0524214b6a196fe226b0958151",
+    "rationale": "8/8 acceptance criteria verified by passing tests; 40 files changed.",
+    "alternatives_considered": [
+      "Approve on LLM judgement alone (rejected: approvals require test evidence)"
+    ],
+    "timestamp": "2026-10-07T00:23:18.525505Z",
+    "parent_decision_ids": [
+      "D-d2b33e12e1",
+      "D-85d4601c73"
+    ],
+    "outcome": "review approve: 8/8 acceptance criteria verified by passing tests; 40 files changed."
+  },
+  {
+    "decision_id": "D-70bb6d6ad6",
+    "node_id": "release.readiness",
+    "agent": "ReleaseManager",
+    "inputs_hash": "ce04df71c4dc657bae65b857ea83a70b80cc75fbd1e9ebd3bf79091c9be2a66b",
+    "rationale": "REQ-GF-001: Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:23:19.191116Z",
+    "parent_decision_ids": [
+      "D-5d8bf040df"
+    ],
+    "outcome": "release READY: 5/5"
+  }
+]

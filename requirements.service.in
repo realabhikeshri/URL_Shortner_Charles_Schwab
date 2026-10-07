@@ -1,0 +1,12 @@
+# Runtime dependencies of the URL shortener service only (the orchestrator is not shipped in the image).
+# Compiled to requirements.service.txt with versions constrained to uv.lock: `make requirements-service`.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+sqlalchemy[asyncio]>=2.0.30
+aiosqlite>=0.20
+asyncpg>=0.29
+alembic>=1.13
+redis>=5.0
+prometheus-client>=0.20

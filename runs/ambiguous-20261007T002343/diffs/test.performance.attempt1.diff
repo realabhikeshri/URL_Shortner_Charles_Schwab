@@ -1,0 +1,12 @@
+--- /dev/null
++++ b/docs/PERFORMANCE.md
+@@ -0,0 +1,9 @@
++# Performance
++
++<!-- loadcheck:start -->
++Measured 2026-10-07T00:23:50+00:00 on Darwin arm64, Python 3.12.15, sqlite (aiosqlite), single uvicorn worker.
++
++| Requests | Concurrency | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | req/s | errors | target p95 |
++|---|---|---|---|---|---|---|---|---|
++| 600 | 20 | 5.26 | 6.42 | 7.65 | 5.39 | 2802.7 | 0 | 50.0 ms ✅ |
++<!-- loadcheck:end -->

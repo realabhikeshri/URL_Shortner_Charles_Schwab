@@ -1,0 +1,2207 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c9c2273..ac91595 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,3 +3,10 @@
+ All notable changes to this service are documented here (format: Keep a Changelog, versioning: SemVer).
+ 
+ ## [Unreleased]
++
++### Added
++- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key. (REQ-GF-001)
++- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links. (REQ-GF-001)
++- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE. (REQ-GF-001)
++- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes. (REQ-GF-001)
++- Persist links in a relational database managed by reversible migrations. (REQ-GF-001)
+diff --git a/README.md b/README.md
+index ed6424a..67be7d7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,54 @@
+ # URL Shortener
+ 
+-Workspace created by the agentic SDLC orchestrator.
++A production-minded URL shortener (FastAPI, SQLAlchemy 2.0 async, Alembic). Built and evolved by the agentic SDLC orchestrator; every change traces to a run in `runs/`.
++
++## Run
++
++```bash
++uvicorn service.app:create_app --factory --port 8000
++```
++
++## Endpoints
++
++| Method | Path | Summary |
++|---|---|---|
++| GET | `/healthz` | Liveness probe |
++| GET | `/readyz` | Readiness probe (database reachable) |
++| POST | `/api/v1/links` | create link |
++| GET | `/api/v1/links/{code}` | get link |
++| PATCH | `/api/v1/links/{code}` | update link |
++| DELETE | `/api/v1/links/{code}` | delete link |
++| GET | `/{code}` | follow |
++
++Full reference: `docs/service/API.md`; OpenAPI: `docs/openapi.json`.
++
++## Configuration
++
++All settings are environment variables with the `SHORTENER_` prefix:
++
++- `SHORTENER_ALLOW_PRIVATE_HOSTS`
++- `SHORTENER_APP_NAME`
++- `SHORTENER_BASE_URL`
++- `SHORTENER_CODE_LENGTH`
++- `SHORTENER_CODE_MAX_ATTEMPTS`
++- `SHORTENER_CORS_ORIGINS`
++- `SHORTENER_DATABASE_URL`
++- `SHORTENER_DB_AUTO_MIGRATE`
++- `SHORTENER_DB_POOL_SIZE`
++- `SHORTENER_ENVIRONMENT`
++- `SHORTENER_HSTS_ENABLED`
++- `SHORTENER_LOG_JSON`
++- `SHORTENER_LOG_LEVEL`
++- `SHORTENER_MAX_REQUEST_BODY_BYTES`
++- `SHORTENER_MAX_URL_LENGTH`
++- `SHORTENER_REDIRECT_STATUS_CODE`
++
++## Requirements implemented
++
++Latest change: **REQ-GF-001 - URL shortener core service**
++
++- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.
++- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.
++- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.
++- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.
++- Persist links in a relational database managed by reversible migrations.
+diff --git a/docs/design/architecture.md b/docs/design/architecture.md
+new file mode 100644
+index 0000000..035f55f
+--- /dev/null
++++ b/docs/design/architecture.md
+@@ -0,0 +1,43 @@
++# Design - URL shortener core service
++
++Requirement: **REQ-GF-001** (v1, risk medium)
++
++## Summary
++
++Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests. Impact analysis: Empty workspace: greenfield build, no existing code is impacted.
++
++## Components
++
++- service.config / service.db / service.models - settings, async engine, Link model (UTC-safe timestamps)
++- service.domain.codes - base62 CSPRNG codes, alias validation, reserved words
++- service.domain.urls - scheme/host validation and normalisation
++- service.links.LinkService + service.repository - use cases and SQL
++- service.api.{links,redirect,health,middleware} - HTTP surface, pure-ASGI middleware
++
++## Decisions
++
++| Decision | Rationale / rejected alternative |
++|---|---|
++| 302 by default (307 configurable) | 301 is cached forever by browsers, breaking disable/delete and analytics |
++| 7-char random base62 codes with bounded retry | 62^7 = 3.5e12; per-insert collision p = n/62^7; no central counter to coordinate |
++| Soft delete + 410 Gone | keeps audit history and prevents silent alias re-use |
++| Idempotency-Key stored on the link with a request fingerprint | simple, transactional, survives restarts |
++
++## Data model
++
++- `links(id, code UNIQUE, target_url, is_custom, tags JSON, disabled, created_at, updated_at, deleted_at, idempotency_key UNIQUE, request_fingerprint)`
++
++## Risks and assumptions
++
++- none identified
++
++## Acceptance criteria
++
++- **AC-1** Given a valid https URL, when a client POSTs it to /api/v1/links, then the API returns 201 with code, short_url and created_at.
++- **AC-2** Given an existing short code, when a client requests GET /{code}, then the service redirects with 302 to the stored target and Cache-Control no-store.
++- **AC-3** Given an unknown code, when a client requests GET /{code}, then the service returns 404 using the error envelope.
++- **AC-4** Given a javascript:, private-network or malformed URL, when a client tries to shorten it, then the API rejects it with 422.
++- **AC-5** Given the same Idempotency-Key and body sent twice, when both requests complete, then exactly one link exists and the second response is a replay.
++- **AC-6** Given a disabled or deleted link, when a client follows it, then the service returns 410 Gone.
++- **AC-7** Given the service is running, when probes call /healthz and /readyz, then they report liveness and database readiness.
++- **AC-8** Given the migration history, when it is upgraded, downgraded and upgraded again, then every step succeeds.
+diff --git a/docs/service/API.md b/docs/service/API.md
+new file mode 100644
+index 0000000..35e25e0
+--- /dev/null
++++ b/docs/service/API.md
+@@ -0,0 +1,69 @@
++# URL Shortener reference
++
++Version 0.1.0. Generated from the live OpenAPI schema by the DocWriter agent; do not edit by hand.
++
++## `POST /api/v1/links`
++
++Create Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `Idempotency-Key` | header | False |
++
++Request body: `LinkCreate`
++
++Responses: `201`, `422`
++
++## `DELETE /api/v1/links/{code}`
++
++Delete Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `204`, `422`
++
++## `GET /api/v1/links/{code}`
++
++Get Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `200`, `422`
++
++## `PATCH /api/v1/links/{code}`
++
++Update Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Request body: `LinkUpdate`
++
++Responses: `200`, `422`
++
++## `GET /healthz`
++
++Liveness probe
++
++Responses: `200`
++
++## `GET /readyz`
++
++Readiness probe (database reachable)
++
++Responses: `200`
++
++## `GET /{code}`
++
++Follow
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `302`, `404`, `410`, `422`
+diff --git a/pyproject.toml b/pyproject.toml
+index 24c50c3..380a122 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -2,7 +2,16 @@
+ name = "url-shortener"
+ version = "0.1.0"
+ requires-python = ">=3.11"
+-dependencies = []
++dependencies = [
++    "fastapi>=0.115",
++    "uvicorn[standard]>=0.30",
++    "pydantic>=2.7",
++    "pydantic-settings>=2.3",
++    "sqlalchemy[asyncio]>=2.0.30",
++    "aiosqlite>=0.20",
++    "asyncpg>=0.29",
++    "alembic>=1.13",
++]
+ 
+ [tool.ruff]
+ line-length = 100
+diff --git a/service/__init__.py b/service/__init__.py
+new file mode 100644
+index 0000000..6547703
+--- /dev/null
++++ b/service/__init__.py
+@@ -0,0 +1,4 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""URL shortener service."""
++
++__version__ = "0.1.0"
+diff --git a/service/alembic.ini b/service/alembic.ini
+new file mode 100644
+index 0000000..5bb4cf0
+--- /dev/null
++++ b/service/alembic.ini
+@@ -0,0 +1,39 @@
++# lineage: REQ-GF-001 / implement.foundation
++[alembic]
++script_location = %(here)s/migrations
++prepend_sys_path = .
++path_separator = os
++# The URL comes from SHORTENER_DATABASE_URL / service.config, never from this file.
++sqlalchemy.url =
++
++[loggers]
++keys = root,sqlalchemy,alembic
++
++[handlers]
++keys = console
++
++[formatters]
++keys = generic
++
++[logger_root]
++level = WARNING
++handlers = console
++
++[logger_sqlalchemy]
++level = WARNING
++handlers =
++qualname = sqlalchemy.engine
++
++[logger_alembic]
++level = WARNING
++handlers =
++qualname = alembic
++
++[handler_console]
++class = StreamHandler
++args = (sys.stderr,)
++level = NOTSET
++formatter = generic
++
++[formatter_generic]
++format = %(levelname)-5.5s [%(name)s] %(message)s
+diff --git a/service/api/__init__.py b/service/api/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/service/api/deps.py b/service/api/deps.py
+new file mode 100644
+index 0000000..c07f35f
+--- /dev/null
++++ b/service/api/deps.py
+@@ -0,0 +1,34 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""FastAPI dependencies shared by the routers."""
++
++from collections.abc import AsyncIterator
++from typing import Annotated
++
++from fastapi import Depends, Request
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.config import Settings
++from service.db import Database
++from service.links import LinkService
++
++
++def get_settings(request: Request) -> Settings:
++    settings: Settings = request.app.state.settings
++    return settings
++
++
++def get_database(request: Request) -> Database:
++    database: Database = request.app.state.db
++    return database
++
++
++async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
++    async with get_database(request).session() as session:
++        yield session
++
++
++async def get_link_service(
++    session: Annotated[AsyncSession, Depends(get_session)],
++    settings: Annotated[Settings, Depends(get_settings)],
++) -> LinkService:
++    return LinkService(session, settings)
+diff --git a/service/api/health.py b/service/api/health.py
+new file mode 100644
+index 0000000..1589d03
+--- /dev/null
++++ b/service/api/health.py
+@@ -0,0 +1,37 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Liveness and readiness probes."""
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends
++from fastapi.responses import JSONResponse
++
++from service.api.deps import get_database
++from service.db import Database
++from service.observability import get_logger
++
++router = APIRouter(tags=["health"])
++log = get_logger("health")
++
++
++@router.get("/healthz", summary="Liveness probe")
++async def healthz() -> dict[str, str]:
++    return {"status": "ok"}
++
++
++@router.get("/readyz", summary="Readiness probe (database reachable)")
++async def readyz(db: Annotated[Database, Depends(get_database)]) -> JSONResponse:
++    checks: dict[str, str] = {}
++    try:
++        await db.ping()
++        checks["database"] = "ok"
++    except Exception as exc:
++        log.warning(
++            "readiness check failed", extra={"check": "database", "error": type(exc).__name__}
++        )
++        checks["database"] = "unavailable"
++    ready = all(v == "ok" for v in checks.values())
++    return JSONResponse(
++        {"status": "ready" if ready else "not_ready", "checks": checks},
++        status_code=200 if ready else 503,
++    )
+diff --git a/service/api/links.py b/service/api/links.py
+new file mode 100644
+index 0000000..05431ec
+--- /dev/null
++++ b/service/api/links.py
+@@ -0,0 +1,43 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Link management API (/api/v1/links)."""
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, Header, Response, status
++
++from service.api.deps import get_link_service
++from service.links import LinkService
++from service.schemas import LinkCreate, LinkOut, LinkUpdate
++
++router = APIRouter(prefix="/api/v1/links", tags=["links"])
++Service = Annotated[LinkService, Depends(get_link_service)]
++
++
++@router.post("", status_code=status.HTTP_201_CREATED, response_model=LinkOut)
++async def create_link(
++    payload: LinkCreate,
++    response: Response,
++    service: Service,
++    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
++) -> LinkOut:
++    link, created = await service.create(payload, idempotency_key)
++    if not created:
++        response.headers["Idempotent-Replayed"] = "true"
++    response.headers["Location"] = f"/api/v1/links/{link.code}"
++    return service.to_out(link)
++
++
++@router.get("/{code}", response_model=LinkOut)
++async def get_link(code: str, service: Service) -> LinkOut:
++    return service.to_out(await service.get(code))
++
++
++@router.patch("/{code}", response_model=LinkOut)
++async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
++    return service.to_out(await service.update(code, patch))
++
++
++@router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)
++async def delete_link(code: str, service: Service) -> Response:
++    await service.delete(code)
++    return Response(status_code=status.HTTP_204_NO_CONTENT)
+diff --git a/service/api/middleware.py b/service/api/middleware.py
+new file mode 100644
+index 0000000..7a96356
+--- /dev/null
++++ b/service/api/middleware.py
+@@ -0,0 +1,141 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Pure-ASGI middleware: request ids + access log, security headers, body size limit."""
++
++import json
++import re
++import time
++import uuid
++
++from starlette.datastructures import MutableHeaders
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
++
++from service.errors import PayloadTooLargeError, error_body
++from service.observability import get_logger, request_id_var
++
++access_log = get_logger("access")
++_VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
++
++
++class RequestContextMiddleware:
++    """Assigns ``X-Request-ID`` (accepting a well-formed inbound one) and logs each request.
++
++    The access log deliberately records method, route, status and latency only: no client IP,
++    user agent or query string (compliance policy CMP-001).
++    """
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++        inbound = dict(scope["headers"]).get(b"x-request-id", b"").decode("latin-1")
++        request_id = inbound if _VALID_REQUEST_ID.match(inbound) else uuid.uuid4().hex
++        token = request_id_var.set(request_id)
++        started = time.perf_counter()
++        status = 500
++
++        async def send_wrapper(message: Message) -> None:
++            nonlocal status
++            if message["type"] == "http.response.start":
++                status = message["status"]
++                MutableHeaders(scope=message).append("X-Request-ID", request_id)
++            await send(message)
++
++        try:
++            await self.app(scope, receive, send_wrapper)
++        finally:
++            route = scope.get("route")
++            access_log.info(
++                "request",
++                extra={
++                    "method": scope["method"],
++                    "route": getattr(route, "path", "unmatched"),
++                    "status": status,
++                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
++                },
++            )
++            request_id_var.reset(token)
++
++
++_SECURITY_HEADERS = {
++    "X-Content-Type-Options": "nosniff",
++    "X-Frame-Options": "DENY",
++    "Referrer-Policy": "no-referrer",
++    "Cross-Origin-Opener-Policy": "same-origin",
++    "Permissions-Policy": "interest-cohort=()",
++}
++_API_CSP = "default-src 'none'; frame-ancestors 'none'"
++_DOCS_PATHS = ("/docs", "/redoc")
++
++
++class SecurityHeadersMiddleware:
++    def __init__(self, app: ASGIApp, *, hsts: bool = False) -> None:
++        self.app = app
++        self.hsts = hsts
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++        is_docs = str(scope.get("path", "")).startswith(_DOCS_PATHS)
++
++        async def send_wrapper(message: Message) -> None:
++            if message["type"] == "http.response.start":
++                headers = MutableHeaders(scope=message)
++                for key, value in _SECURITY_HEADERS.items():
++                    headers.setdefault(key, value)
++                if not is_docs:
++                    headers.setdefault("Content-Security-Policy", _API_CSP)
++                if self.hsts:
++                    headers.setdefault("Strict-Transport-Security", "max-age=63072000")
++            await send(message)
++
++        await self.app(scope, receive, send_wrapper)
++
++
++class BodySizeLimitMiddleware:
++    """Rejects bodies over ``max_bytes`` with 413, by Content-Length and while streaming."""
++
++    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
++        self.app = app
++        self.max_bytes = max_bytes
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++        declared = dict(scope["headers"]).get(b"content-length")
++        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
++            await self._reject(send)
++            return
++        received = 0
++
++        async def limited_receive() -> Message:
++            nonlocal received
++            message = await receive()
++            if message["type"] == "http.request":
++                received += len(message.get("body", b""))
++                if received > self.max_bytes:
++                    # Raised inside the route's body read, so the app's handler renders a 413.
++                    raise PayloadTooLargeError(f"request body exceeds {self.max_bytes} bytes")
++            return message
++
++        await self.app(scope, limited_receive, send)
++
++    async def _reject(self, send: Send) -> None:
++        body = json.dumps(
++            error_body("payload_too_large", f"request body exceeds {self.max_bytes} bytes")
++        ).encode()
++        await send(
++            {
++                "type": "http.response.start",
++                "status": 413,
++                "headers": [
++                    (b"content-type", b"application/json"),
++                    (b"content-length", str(len(body)).encode()),
++                ],
++            }
++        )
++        await send({"type": "http.response.body", "body": body})
+diff --git a/service/api/redirect.py b/service/api/redirect.py
+new file mode 100644
+index 0000000..8271dc5
+--- /dev/null
++++ b/service/api/redirect.py
+@@ -0,0 +1,30 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Public redirect endpoint (registered last so fixed routes win)."""
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, Path
++from fastapi.responses import RedirectResponse
++
++from service.api.deps import get_link_service
++from service.links import LinkService
++
++router = APIRouter(tags=["redirect"])
++
++
++@router.get(
++    "/{code}",
++    status_code=302,
++    response_class=RedirectResponse,
++    responses={404: {"description": "Unknown code"}, 410: {"description": "Expired or disabled"}},
++)
++async def follow(
++    code: Annotated[str, Path(min_length=1, max_length=64)],
++    service: Annotated[LinkService, Depends(get_link_service)],
++) -> RedirectResponse:
++    link = await service.resolve(code)
++    return RedirectResponse(
++        link.target_url,
++        status_code=service.settings.redirect_status_code,
++        headers={"Cache-Control": "private, no-store"},
++    )
+diff --git a/service/app.py b/service/app.py
+new file mode 100644
+index 0000000..2a3d730
+--- /dev/null
++++ b/service/app.py
+@@ -0,0 +1,62 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Application factory."""
++
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
++
++from fastapi import FastAPI
++from fastapi.middleware.cors import CORSMiddleware
++
++from service import __version__
++from service.api import health, links, redirect
++from service.api.middleware import (
++    BodySizeLimitMiddleware,
++    RequestContextMiddleware,
++    SecurityHeadersMiddleware,
++)
++from service.config import Settings, get_settings
++from service.db import Database, migrate
++from service.errors import install_error_handlers
++from service.observability import configure_logging, get_logger
++
++log = get_logger("app")
++
++
++def create_app(settings: Settings | None = None) -> FastAPI:
++    settings = settings or get_settings()
++
++    @asynccontextmanager
++    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
++        configure_logging(settings.log_level, json_output=settings.log_json)
++        if settings.db_auto_migrate:
++            await migrate(settings.database_url)
++        app.state.db = Database(settings.database_url, pool_size=settings.db_pool_size)
++        log.info("startup complete", extra={"environment": settings.environment})
++        try:
++            yield
++        finally:
++            await app.state.db.dispose()
++
++    app = FastAPI(
++        title="URL Shortener",
++        version=__version__,
++        lifespan=lifespan,
++        openapi_url="/api/v1/openapi.json",
++    )
++    app.state.settings = settings
++    install_error_handlers(app)
++    if settings.cors_origins:
++        app.add_middleware(
++            CORSMiddleware,
++            allow_origins=settings.cors_origins,
++            allow_methods=["GET", "POST", "PATCH", "DELETE"],
++            allow_headers=["Content-Type", "Idempotency-Key", "X-Request-ID"],
++        )
++    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
++    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.hsts_enabled)
++    app.add_middleware(RequestContextMiddleware)
++
++    app.include_router(health.router)
++    app.include_router(links.router)
++    app.include_router(redirect.router)  # catch-all /{code}: keep last
++    return app
+diff --git a/service/config.py b/service/config.py
+new file mode 100644
+index 0000000..4add0bc
+--- /dev/null
++++ b/service/config.py
+@@ -0,0 +1,47 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
++
++from functools import lru_cache
++from typing import Literal
++
++from pydantic import Field, field_validator
++from pydantic_settings import BaseSettings, SettingsConfigDict
++
++
++class Settings(BaseSettings):
++    model_config = SettingsConfigDict(env_prefix="SHORTENER_", env_file=".env", extra="ignore")
++
++    app_name: str = "url-shortener"
++    environment: Literal["dev", "test", "prod"] = "dev"
++    base_url: str = "http://localhost:8000"
++    database_url: str = "sqlite+aiosqlite:///./shortener.db"
++    db_auto_migrate: bool = True
++    db_pool_size: int = Field(10, ge=1, le=100)
++
++    redirect_status_code: Literal[302, 307] = 302
++    code_length: int = Field(7, ge=5, le=12)
++    code_max_attempts: int = Field(5, ge=1, le=20)
++    allow_private_hosts: bool = False
++    max_url_length: int = Field(2048, ge=64, le=8192)
++    max_request_body_bytes: int = Field(16_384, ge=1024)
++
++    cors_origins: list[str] = Field(default_factory=list)
++    hsts_enabled: bool = False
++    log_level: str = "INFO"
++    log_json: bool = True
++
++    @field_validator("base_url")
++    @classmethod
++    def _strip_trailing_slash(cls, value: str) -> str:
++        return value.rstrip("/")
++
++    @field_validator("redirect_status_code", mode="before")
++    @classmethod
++    def _coerce_status(cls, value: object) -> object:
++        # Environment variables arrive as strings; Literal[302, 307] needs an int.
++        return int(value) if isinstance(value, str) and value.strip().isdigit() else value
++
++
++@lru_cache(maxsize=1)
++def get_settings() -> Settings:
++    return Settings()
+diff --git a/service/db.py b/service/db.py
+new file mode 100644
+index 0000000..8f8795e
+--- /dev/null
++++ b/service/db.py
+@@ -0,0 +1,82 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Async SQLAlchemy engine/session management and migration helpers."""
++
++import asyncio
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import Any
++
++from alembic import command
++from alembic.config import Config
++from sqlalchemy import DateTime, TypeDecorator, text
++from sqlalchemy.engine import Dialect
++from sqlalchemy.ext.asyncio import (
++    AsyncEngine,
++    AsyncSession,
++    async_sessionmaker,
++    create_async_engine,
++)
++from sqlalchemy.orm import DeclarativeBase
++
++ALEMBIC_INI = Path(__file__).resolve().parent / "alembic.ini"
++
++
++class Base(DeclarativeBase):
++    pass
++
++
++class UTCDateTime(TypeDecorator[datetime]):
++    """Timezone-aware UTC datetimes on every backend (SQLite drops tzinfo otherwise)."""
++
++    impl = DateTime(timezone=True)
++    cache_ok = True
++
++    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
++        if value is None:
++            return None
++        if value.tzinfo is None:
++            raise ValueError("naive datetimes are not allowed")
++        return value.astimezone(UTC)
++
++    def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
++        if value is None:
++            return None
++        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
++
++
++def utcnow() -> datetime:
++    return datetime.now(UTC)
++
++
++class Database:
++    def __init__(self, url: str, *, pool_size: int = 10) -> None:
++        kwargs: dict[str, Any] = {"pool_pre_ping": True}
++        if url.startswith("sqlite"):
++            kwargs["connect_args"] = {"check_same_thread": False}
++        else:
++            kwargs["pool_size"] = pool_size
++        self.url = url
++        self.engine: AsyncEngine = create_async_engine(url, **kwargs)
++        self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
++
++    def session(self) -> AsyncSession:
++        return self.sessionmaker()
++
++    async def ping(self) -> bool:
++        async with self.engine.connect() as conn:
++            await conn.execute(text("SELECT 1"))
++        return True
++
++    async def dispose(self) -> None:
++        await self.engine.dispose()
++
++
++def run_migrations(url: str, revision: str = "head") -> None:
++    """Upgrade the schema with Alembic (blocking; call from a worker thread)."""
++    cfg = Config(str(ALEMBIC_INI))
++    cfg.set_main_option("sqlalchemy.url", url)
++    command.upgrade(cfg, revision)
++
++
++async def migrate(url: str) -> None:
++    await asyncio.to_thread(run_migrations, url)
+diff --git a/service/domain/__init__.py b/service/domain/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/service/domain/codes.py b/service/domain/codes.py
+new file mode 100644
+index 0000000..8488d10
+--- /dev/null
++++ b/service/domain/codes.py
+@@ -0,0 +1,85 @@
++# lineage: REQ-GF-001 / implement.codes (see runs/ for the decision trail)
++"""Short-code generation (base62) and custom-alias validation.
++
++Capacity: 62**7 ~= 3.52e12 codes. With n links stored, a fresh random code collides with
++probability n / 62**7 (1e9 links -> 2.8e-4). Generation retries up to ``max_attempts`` times,
++so an exhausted retry budget needs (n / 62**7) ** attempts: ~1.7e-18 at 1e9 links with 5 tries.
++The database unique constraint remains the final arbiter for races between writers.
++"""
++
++import re
++import secrets
++import string
++
++ALPHABET = string.digits + string.ascii_uppercase + string.ascii_lowercase
++BASE = len(ALPHABET)
++_INDEX = {ch: i for i, ch in enumerate(ALPHABET)}
++
++ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$")
++RESERVED = frozenset(
++    {
++        "api",
++        "healthz",
++        "readyz",
++        "metrics",
++        "docs",
++        "redoc",
++        "openapi.json",
++        "static",
++        "admin",
++        "login",
++        "favicon.ico",
++        "robots.txt",
++    }
++)
++
++
++class AliasError(ValueError):
++    """The requested custom alias is not acceptable."""
++
++
++def encode(number: int) -> str:
++    if number < 0:
++        raise ValueError("cannot encode negative numbers")
++    if number == 0:
++        return ALPHABET[0]
++    digits = []
++    while number:
++        number, rem = divmod(number, BASE)
++        digits.append(ALPHABET[rem])
++    return "".join(reversed(digits))
++
++
++def decode(code: str) -> int:
++    if not code:
++        raise ValueError("empty code")
++    number = 0
++    for ch in code:
++        if ch not in _INDEX:
++            raise ValueError(f"invalid base62 character {ch!r}")
++        number = number * BASE + _INDEX[ch]
++    return number
++
++
++def generate_code(length: int = 7) -> str:
++    """Uniformly random base62 code of exactly ``length`` characters (CSPRNG)."""
++    return "".join(secrets.choice(ALPHABET) for _ in range(length))
++
++
++def collision_probability(existing: int, length: int = 7) -> float:
++    """Probability that one freshly generated code hits an existing one."""
++    return existing / float(BASE**length)
++
++
++def normalize_alias(alias: str) -> str:
++    """Validate a custom alias and return its canonical (lower-case) form."""
++    candidate = alias.strip()
++    if not ALIAS_PATTERN.match(candidate):
++        raise AliasError(
++            "alias must be 3-32 characters of letters, digits, '-' or '_' "
++            "and start with a letter or digit"
++        )
++    canonical = candidate.lower()
++    if canonical in RESERVED:
++        raise AliasError(f"alias '{candidate}' is reserved")
++    return canonical
+diff --git a/service/domain/urls.py b/service/domain/urls.py
+new file mode 100644
+index 0000000..685c63e
+--- /dev/null
++++ b/service/domain/urls.py
+@@ -0,0 +1,76 @@
++# lineage: REQ-GF-001 / implement.urls (see runs/ for the decision trail)
++"""Target-URL validation and normalisation.
++
++Rules: http/https only (javascript:, data:, file: and every other scheme are rejected), at most
++``max_length`` characters, a host is required, no embedded credentials (a phishing vector), and
++by default no loopback/private/link-local/reserved IP literals or local-only host names.
++Normalisation lower-cases scheme and host, IDNA-encodes the host, drops default ports and
++gives an empty path a ``/``. DNS is not resolved here (see docs/LIMITATIONS.md).
++"""
++
++import ipaddress
++from urllib.parse import urlsplit, urlunsplit
++
++ALLOWED_SCHEMES = frozenset({"http", "https"})
++DEFAULT_PORTS = {"http": 80, "https": 443}
++LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".localdomain")
++
++
++class UrlError(ValueError):
++    """The URL is not acceptable as a redirect target."""
++
++
++def _is_forbidden_ip(host: str) -> bool:
++    try:
++        ip = ipaddress.ip_address(host)
++    except ValueError:
++        return False
++    return (
++        ip.is_private
++        or ip.is_loopback
++        or ip.is_link_local
++        or ip.is_reserved
++        or ip.is_multicast
++        or ip.is_unspecified
++    )
++
++
++def normalize_url(raw: str, *, max_length: int = 2048, allow_private: bool = False) -> str:
++    url = raw.strip()
++    if not url:
++        raise UrlError("url is empty")
++    if len(url) > max_length:
++        raise UrlError(f"url exceeds {max_length} characters")
++    if any(ch in url for ch in "\r\n\t\x00") or " " in url:
++        raise UrlError("url contains whitespace or control characters")
++    parts = urlsplit(url)
++    scheme = parts.scheme.lower()
++    if scheme not in ALLOWED_SCHEMES:
++        raise UrlError(f"scheme '{scheme or '(none)'}' is not allowed; use http or https")
++    if parts.username is not None or parts.password is not None:
++        raise UrlError("urls with embedded credentials are not allowed")
++    host = parts.hostname
++    if not host:
++        raise UrlError("url has no host")
++    try:
++        port = parts.port
++    except ValueError as exc:
++        raise UrlError("url has an invalid port") from exc
++    try:
++        ascii_host = host.encode("idna").decode("ascii").lower() if not host.isascii() else host
++    except UnicodeError as exc:
++        raise UrlError("url host is not a valid domain name") from exc
++    ascii_host = ascii_host.lower().rstrip(".")
++    if not allow_private:
++        if _is_forbidden_ip(ascii_host):
++            raise UrlError("private, loopback and reserved addresses are not allowed")
++        if ascii_host == "localhost" or ascii_host.endswith(LOCAL_SUFFIXES):
++            raise UrlError("local host names are not allowed")
++    netloc = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
++    if port is not None and port != DEFAULT_PORTS[scheme]:
++        netloc = f"{netloc}:{port}"
++    path = parts.path or "/"
++    normalized = urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
++    if len(normalized) > max_length:
++        raise UrlError(f"url exceeds {max_length} characters")
++    return normalized
+diff --git a/service/errors.py b/service/errors.py
+new file mode 100644
+index 0000000..9508766
+--- /dev/null
++++ b/service/errors.py
+@@ -0,0 +1,103 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Domain errors and the consistent error envelope ``{"error": {code, message, request_id}}``."""
++
++from typing import Any
++
++from fastapi import FastAPI, Request
++from fastapi.exceptions import RequestValidationError
++from fastapi.responses import JSONResponse
++from starlette.exceptions import HTTPException as StarletteHTTPException
++
++from service.observability import get_logger, request_id_var
++
++log = get_logger("errors")
++
++
++class AppError(Exception):
++    status_code = 400
++    code = "bad_request"
++
++    def __init__(self, message: str, *, headers: dict[str, str] | None = None) -> None:
++        super().__init__(message)
++        self.message = message
++        self.headers = headers or {}
++
++
++class NotFoundError(AppError):
++    status_code = 404
++    code = "not_found"
++
++
++class GoneError(AppError):
++    status_code = 410
++    code = "gone"
++
++
++class ConflictError(AppError):
++    status_code = 409
++    code = "conflict"
++
++
++class InvalidInputError(AppError):
++    status_code = 422
++    code = "invalid_input"
++
++
++class PayloadTooLargeError(AppError):
++    status_code = 413
++    code = "payload_too_large"
++
++
++def error_body(code: str, message: str, details: Any = None) -> dict[str, Any]:
++    body: dict[str, Any] = {"code": code, "message": message, "request_id": request_id_var.get()}
++    if details is not None:
++        body["details"] = details
++    return {"error": body}
++
++
++def error_response(
++    status: int,
++    code: str,
++    message: str,
++    *,
++    details: Any = None,
++    headers: dict[str, str] | None = None,
++) -> JSONResponse:
++    return JSONResponse(error_body(code, message, details), status_code=status, headers=headers)
++
++
++_HTTP_CODES = {
++    400: "bad_request",
++    401: "unauthorized",
++    403: "forbidden",
++    404: "not_found",
++    405: "method_not_allowed",
++    413: "payload_too_large",
++    429: "rate_limited",
++}
++
++
++def install_error_handlers(app: FastAPI) -> None:
++    @app.exception_handler(AppError)
++    async def _app_error(_: Request, exc: AppError) -> JSONResponse:
++        return error_response(exc.status_code, exc.code, exc.message, headers=exc.headers)
++
++    @app.exception_handler(RequestValidationError)
++    async def _validation(_: Request, exc: RequestValidationError) -> JSONResponse:
++        details = [
++            {"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")}
++            for e in exc.errors()
++        ]
++        return error_response(422, "validation_error", "request validation failed", details=details)
++
++    @app.exception_handler(StarletteHTTPException)
++    async def _http(_: Request, exc: StarletteHTTPException) -> JSONResponse:
++        code = _HTTP_CODES.get(exc.status_code, "http_error")
++        return error_response(
++            exc.status_code, code, str(exc.detail), headers=getattr(exc, "headers", None)
++        )
++
++    @app.exception_handler(Exception)
++    async def _unhandled(_: Request, exc: Exception) -> JSONResponse:
++        log.exception("unhandled error", extra={"error_type": type(exc).__name__})
++        return error_response(500, "internal_error", "internal server error")
+diff --git a/service/links.py b/service/links.py
+new file mode 100644
+index 0000000..d53d3cd
+--- /dev/null
++++ b/service/links.py
+@@ -0,0 +1,144 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Link use cases: create (idempotent), resolve, read, update, soft-delete."""
++
++import hashlib
++import json
++
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.config import Settings
++from service.db import utcnow
++from service.domain.codes import AliasError, generate_code, normalize_alias
++from service.domain.urls import UrlError, normalize_url
++from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
++from service.models import Link
++from service.observability import get_logger
++from service.repository import LinkRepository
++from service.schemas import LinkCreate, LinkOut, LinkUpdate
++
++log = get_logger("links")
++
++
++def fingerprint(payload: LinkCreate) -> str:
++    canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
++    return hashlib.sha256(canonical.encode()).hexdigest()
++
++
++class LinkService:
++    def __init__(self, session: AsyncSession, settings: Settings) -> None:
++        self.session = session
++        self.settings = settings
++        self.repo = LinkRepository(session)
++
++    def to_out(self, link: Link) -> LinkOut:
++        return LinkOut(
++            code=link.code,
++            short_url=f"{self.settings.base_url}/{link.code}",
++            target_url=link.target_url,
++            is_custom=link.is_custom,
++            tags=list(link.tags or []),
++            disabled=link.disabled,
++            created_at=link.created_at,
++            updated_at=link.updated_at,
++        )
++
++    async def create(
++        self, payload: LinkCreate, idempotency_key: str | None = None
++    ) -> tuple[Link, bool]:
++        """Return ``(link, created)``; ``created`` is False for an idempotent replay."""
++        try:
++            target = normalize_url(
++                payload.url,
++                max_length=self.settings.max_url_length,
++                allow_private=self.settings.allow_private_hosts,
++            )
++        except UrlError as exc:
++            raise InvalidInputError(str(exc)) from exc
++        digest = fingerprint(payload)
++        if idempotency_key:
++            replay = await self._replay(idempotency_key, digest)
++            if replay is not None:
++                return replay, False
++
++        if payload.custom_alias is not None:
++            try:
++                alias = normalize_alias(payload.custom_alias)
++            except AliasError as exc:
++                raise InvalidInputError(str(exc)) from exc
++            if await self.repo.alias_taken(alias):
++                raise ConflictError(f"alias '{payload.custom_alias}' is already taken")
++            candidates = [alias]
++        else:
++            candidates = [
++                generate_code(self.settings.code_length)
++                for _ in range(self.settings.code_max_attempts)
++            ]
++
++        for code in candidates:
++            if payload.custom_alias is None and await self.repo.code_exists(code):
++                log.info("code collision, retrying", extra={"code_length": len(code)})
++                continue
++            link = Link(
++                code=code,
++                target_url=target,
++                is_custom=payload.custom_alias is not None,
++                tags=list(payload.tags),
++                idempotency_key=idempotency_key,
++                request_fingerprint=digest if idempotency_key else None,
++            )
++            try:
++                await self.repo.add(link)
++                await self.session.commit()
++            except IntegrityError:
++                await self.session.rollback()
++                if idempotency_key:
++                    replay = await self._replay(idempotency_key, digest)
++                    if replay is not None:
++                        return replay, False
++                if payload.custom_alias is not None:
++                    raise ConflictError(
++                        f"alias '{payload.custom_alias}' is already taken"
++                    ) from None
++                continue
++            log.info("link created", extra={"code": link.code, "custom": link.is_custom})
++            return link, True
++        raise ConflictError("could not allocate a unique code; please retry")
++
++    async def _replay(self, key: str, digest: str) -> Link | None:
++        existing = await self.repo.get_by_idempotency_key(key)
++        if existing is None:
++            return None
++        if existing.request_fingerprint != digest:
++            raise ConflictError("Idempotency-Key was already used with a different request body")
++        return existing
++
++    async def resolve(self, code: str) -> Link:
++        """Look up a link for redirecting; raises 404 for unknown and 410 for gone links."""
++        link = await self.repo.get_by_code(code)
++        if link is None:
++            raise NotFoundError(f"no link with code '{code}'")
++        if link.deleted_at is not None or link.disabled:
++            raise GoneError(f"link '{code}' is no longer available")
++        return link
++
++    async def get(self, code: str) -> Link:
++        link = await self.repo.get_by_code(code)
++        if link is None or link.deleted_at is not None:
++            raise NotFoundError(f"no link with code '{code}'")
++        return link
++
++    async def update(self, code: str, patch: LinkUpdate) -> Link:
++        link = await self.get(code)
++        if patch.disabled is not None:
++            link.disabled = patch.disabled
++        link.updated_at = utcnow()
++        await self.session.commit()
++        return link
++
++    async def delete(self, code: str) -> None:
++        link = await self.get(code)
++        link.deleted_at = utcnow()
++        link.updated_at = link.deleted_at
++        await self.session.commit()
++        log.info("link deleted", extra={"code": code})
+diff --git a/service/migrations/__init__.py b/service/migrations/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/service/migrations/env.py b/service/migrations/env.py
+new file mode 100644
+index 0000000..1fd4162
+--- /dev/null
++++ b/service/migrations/env.py
+@@ -0,0 +1,58 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Alembic environment (async engine; SQLite uses batch mode for ALTERs)."""
++
++import asyncio
++import os
++from logging.config import fileConfig
++
++from alembic import context
++from sqlalchemy.engine import Connection
++from sqlalchemy.ext.asyncio import create_async_engine
++
++from service import models  # noqa: F401  (registers tables on Base.metadata)
++from service.config import Settings
++from service.db import Base
++
++config = context.config
++if config.config_file_name is not None and not config.attributes.get("skip_logging"):
++    fileConfig(config.config_file_name, disable_existing_loggers=False)
++
++target_metadata = Base.metadata
++
++
++def database_url() -> str:
++    return (
++        config.get_main_option("sqlalchemy.url")
++        or os.environ.get("SHORTENER_DATABASE_URL")
++        or Settings().database_url
++    )
++
++
++def do_run_migrations(connection: Connection) -> None:
++    context.configure(
++        connection=connection,
++        target_metadata=target_metadata,
++        render_as_batch=connection.dialect.name == "sqlite",
++        compare_type=True,
++    )
++    with context.begin_transaction():
++        context.run_migrations()
++
++
++async def run_async_migrations() -> None:
++    engine = create_async_engine(database_url())
++    async with engine.connect() as connection:
++        await connection.run_sync(do_run_migrations)
++    await engine.dispose()
++
++
++def run_migrations_offline() -> None:
++    context.configure(url=database_url(), target_metadata=target_metadata, literal_binds=True)
++    with context.begin_transaction():
++        context.run_migrations()
++
++
++if context.is_offline_mode():
++    run_migrations_offline()
++else:
++    asyncio.run(run_async_migrations())
+diff --git a/service/migrations/script.py.mako b/service/migrations/script.py.mako
+new file mode 100644
+index 0000000..e67e889
+--- /dev/null
++++ b/service/migrations/script.py.mako
+@@ -0,0 +1,25 @@
++"""${message}
++
++Revision ID: ${up_revision}
++Revises: ${down_revision | comma,n}
++Create Date: ${create_date}
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++${imports if imports else ""}
++
++revision: str = ${repr(up_revision)}
++down_revision: str | None = ${repr(down_revision)}
++branch_labels: str | Sequence[str] | None = ${repr(branch_labels)}
++depends_on: str | Sequence[str] | None = ${repr(depends_on)}
++
++
++def upgrade() -> None:
++    ${upgrades if upgrades else "pass"}
++
++
++def downgrade() -> None:
++    ${downgrades if downgrades else "pass"}
+diff --git a/service/migrations/versions/__init__.py b/service/migrations/versions/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/service/migrations/versions/rev_0001_initial.py b/service/migrations/versions/rev_0001_initial.py
+new file mode 100644
+index 0000000..0679969
+--- /dev/null
++++ b/service/migrations/versions/rev_0001_initial.py
+@@ -0,0 +1,41 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Create the links table.
++
++Revision ID: 0001
++Revises:
++Create Date: 2026-10-07
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "0001"
++down_revision: str | None = None
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "links",
++        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column("code", sa.String(length=64), nullable=False),
++        sa.Column("target_url", sa.Text(), nullable=False),
++        sa.Column("is_custom", sa.Boolean(), nullable=False, server_default=sa.false()),
++        sa.Column("tags", sa.JSON(), nullable=False),
++        sa.Column("disabled", sa.Boolean(), nullable=False, server_default=sa.false()),
++        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
++        sa.Column("idempotency_key", sa.String(length=128), nullable=True),
++        sa.Column("request_fingerprint", sa.String(length=64), nullable=True),
++        sa.UniqueConstraint("idempotency_key", name="uq_links_idempotency_key"),
++    )
++    op.create_index("ix_links_code", "links", ["code"], unique=True)
++
++
++def downgrade() -> None:
++    op.drop_index("ix_links_code", table_name="links")
++    op.drop_table("links")
+diff --git a/service/models.py b/service/models.py
+new file mode 100644
+index 0000000..4882af3
+--- /dev/null
++++ b/service/models.py
+@@ -0,0 +1,25 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Persistence model."""
++
++from datetime import datetime
++
++from sqlalchemy import JSON, Boolean, Integer, String, Text
++from sqlalchemy.orm import Mapped, mapped_column
++
++from service.db import Base, UTCDateTime, utcnow
++
++
++class Link(Base):
++    __tablename__ = "links"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
++    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
++    target_url: Mapped[str] = mapped_column(Text)
++    is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
++    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
++    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
++    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
++    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
++    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
++    idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
++    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+diff --git a/service/observability.py b/service/observability.py
+new file mode 100644
+index 0000000..dae7629
+--- /dev/null
++++ b/service/observability.py
+@@ -0,0 +1,46 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++"""Structured JSON logging with a per-request id carried in a context variable."""
++
++import json
++import logging
++import sys
++from contextvars import ContextVar
++from datetime import UTC, datetime
++from typing import Any
++
++request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
++
++_RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message"}
++
++
++class JsonFormatter(logging.Formatter):
++    def format(self, record: logging.LogRecord) -> str:
++        payload: dict[str, Any] = {
++            "ts": datetime.fromtimestamp(record.created, UTC).isoformat(),
++            "level": record.levelname,
++            "logger": record.name,
++            "message": record.getMessage(),
++            "request_id": request_id_var.get(),
++        }
++        for key, value in record.__dict__.items():
++            if key not in _RESERVED and not key.startswith("_"):
++                payload[key] = value
++        if record.exc_info:
++            payload["exc_info"] = self.formatException(record.exc_info)
++        return json.dumps(payload, default=str)
++
++
++def configure_logging(level: str = "INFO", *, json_output: bool = True) -> None:
++    handler = logging.StreamHandler(sys.stdout)
++    if json_output:
++        handler.setFormatter(JsonFormatter())
++    else:
++        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
++    root = logging.getLogger("service")
++    root.handlers = [handler]
++    root.setLevel(level.upper())
++    root.propagate = False
++
++
++def get_logger(name: str) -> logging.Logger:
++    return logging.getLogger(f"service.{name}")
+diff --git a/service/repository.py b/service/repository.py
+new file mode 100644
+index 0000000..eef8aa4
+--- /dev/null
++++ b/service/repository.py
+@@ -0,0 +1,35 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Data access for links."""
++
++from sqlalchemy import func, select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.models import Link
++
++
++class LinkRepository:
++    def __init__(self, session: AsyncSession) -> None:
++        self.session = session
++
++    async def get_by_code(self, code: str) -> Link | None:
++        result = await self.session.execute(select(Link).where(Link.code == code))
++        return result.scalar_one_or_none()
++
++    async def code_exists(self, code: str) -> bool:
++        result = await self.session.execute(select(Link.id).where(Link.code == code))
++        return result.first() is not None
++
++    async def alias_taken(self, alias: str) -> bool:
++        result = await self.session.execute(
++            select(Link.id).where(func.lower(Link.code) == alias.lower())
++        )
++        return result.first() is not None
++
++    async def get_by_idempotency_key(self, key: str) -> Link | None:
++        result = await self.session.execute(select(Link).where(Link.idempotency_key == key))
++        return result.scalar_one_or_none()
++
++    async def add(self, link: Link) -> Link:
++        self.session.add(link)
++        await self.session.flush()
++        return link
+diff --git a/service/schemas.py b/service/schemas.py
+new file mode 100644
+index 0000000..7f5a2d3
+--- /dev/null
++++ b/service/schemas.py
+@@ -0,0 +1,40 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Public API models."""
++
++from datetime import datetime
++from typing import Annotated
++
++from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
++
++Tag = Annotated[str, StringConstraints(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")]
++
++
++class LinkCreate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    url: str = Field(min_length=1, max_length=8192, examples=["https://example.com/docs"])
++    custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
++    tags: list[Tag] = Field(default_factory=list, max_length=10)
++
++
++class LinkUpdate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    disabled: bool | None = None
++
++    @model_validator(mode="after")
++    def _not_empty(self) -> "LinkUpdate":
++        if not self.model_fields_set:
++            raise ValueError("at least one field must be provided")
++        return self
++
++
++class LinkOut(BaseModel):
++    code: str
++    short_url: str
++    target_url: str
++    is_custom: bool
++    tags: list[str]
++    disabled: bool
++    created_at: datetime
++    updated_at: datetime
+diff --git a/tests/__init__.py b/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/service/__init__.py b/tests/service/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/tests/service/conftest.py b/tests/service/conftest.py
+new file mode 100644
+index 0000000..e5d85e1
+--- /dev/null
++++ b/tests/service/conftest.py
+@@ -0,0 +1,46 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++import shutil
++from collections.abc import AsyncIterator
++from pathlib import Path
++
++import pytest
++from fastapi import FastAPI
++from httpx import ASGITransport, AsyncClient
++
++from service.app import create_app
++from service.config import Settings
++from service.db import run_migrations
++
++
++@pytest.fixture(scope="session")
++def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
++    """Run the real Alembic migrations once; each test gets a copy of the result."""
++    path = tmp_path_factory.mktemp("db") / "template.db"
++    run_migrations(f"sqlite+aiosqlite:///{path}")
++    return path
++
++
++@pytest.fixture
++def settings(tmp_path: Path, migrated_template: Path) -> Settings:
++    db = tmp_path / "test.db"
++    shutil.copyfile(migrated_template, db)
++    return Settings(
++        database_url=f"sqlite+aiosqlite:///{db}",
++        db_auto_migrate=False,
++        base_url="http://sho.rt/",
++        environment="test",
++        log_json=True,
++    )
++
++
++@pytest.fixture
++async def app(settings: Settings) -> AsyncIterator[FastAPI]:
++    application = create_app(settings)
++    async with application.router.lifespan_context(application):
++        yield application
++
++
++@pytest.fixture
++async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
++    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
++        yield c
+diff --git a/tests/service/test_api_links.py b/tests/service/test_api_links.py
+new file mode 100644
+index 0000000..328b133
+--- /dev/null
++++ b/tests/service/test_api_links.py
+@@ -0,0 +1,114 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++from httpx import AsyncClient
++
++from service.config import Settings
++
++
++async def create(client: AsyncClient, **body: object) -> dict[str, object]:
++    resp = await client.post("/api/v1/links", json={"url": "https://example.com/a", **body})
++    assert resp.status_code == 201, resp.text
++    return resp.json()  # type: ignore[no-any-return]
++
++
++async def test_create_returns_201_with_short_url(client: AsyncClient) -> None:
++    resp = await client.post(
++        "/api/v1/links", json={"url": "https://Example.com/docs", "tags": ["launch"]}
++    )
++    assert resp.status_code == 201
++    body = resp.json()
++    assert len(body["code"]) == 7
++    assert body["short_url"] == f"http://sho.rt/{body['code']}"
++    assert body["target_url"] == "https://example.com/docs"
++    assert body["tags"] == ["launch"]
++    assert body["created_at"]
++    assert resp.headers["Location"] == f"/api/v1/links/{body['code']}"
++
++
++async def test_redirect_follows_with_302_and_no_store(client: AsyncClient) -> None:
++    link = await create(client)
++    resp = await client.get(f"/{link['code']}")
++    assert resp.status_code == 302
++    assert resp.headers["location"] == "https://example.com/a"
++    assert resp.headers["cache-control"] == "private, no-store"
++
++
++async def test_unknown_code_is_404(client: AsyncClient) -> None:
++    resp = await client.get("/doesnotexist")
++    assert resp.status_code == 404
++    assert resp.json()["error"]["code"] == "not_found"
++
++
++async def test_invalid_urls_are_rejected_with_422(client: AsyncClient) -> None:
++    for url in ("javascript:alert(1)", "http://127.0.0.1/", "not a url"):
++        resp = await client.post("/api/v1/links", json={"url": url})
++        assert resp.status_code == 422
++        assert resp.json()["error"]["code"] == "invalid_input"
++
++
++async def test_schema_validation_errors_use_envelope(client: AsyncClient) -> None:
++    resp = await client.post("/api/v1/links", json={"url": "https://e.com", "surprise": 1})
++    assert resp.status_code == 422
++    assert resp.json()["error"]["code"] == "validation_error"
++    bad_tags = await client.post("/api/v1/links", json={"url": "https://e.com", "tags": ["a b"]})
++    assert bad_tags.status_code == 422
++
++
++async def test_custom_alias_and_conflict(client: AsyncClient) -> None:
++    link = await create(client, custom_alias="launch-2026")
++    assert link["code"] == "launch-2026"
++    assert link["is_custom"] is True
++    dup = await client.post(
++        "/api/v1/links", json={"url": "https://e.com", "custom_alias": "launch-2026"}
++    )
++    assert dup.status_code == 409
++    reserved = await client.post(
++        "/api/v1/links", json={"url": "https://e.com", "custom_alias": "api"}
++    )
++    assert reserved.status_code == 422
++
++
++async def test_idempotency_key_replays_and_detects_misuse(client: AsyncClient) -> None:
++    headers = {"Idempotency-Key": "req-42"}
++    first = await client.post("/api/v1/links", json={"url": "https://e.com/x"}, headers=headers)
++    again = await client.post("/api/v1/links", json={"url": "https://e.com/x"}, headers=headers)
++    assert first.status_code == again.status_code == 201
++    assert first.json()["code"] == again.json()["code"]
++    assert again.headers["Idempotent-Replayed"] == "true"
++    misuse = await client.post("/api/v1/links", json={"url": "https://e.com/y"}, headers=headers)
++    assert misuse.status_code == 409
++
++
++async def test_metadata_patch_and_soft_delete(client: AsyncClient) -> None:
++    link = await create(client)
++    code = link["code"]
++    meta = await client.get(f"/api/v1/links/{code}")
++    assert meta.status_code == 200
++    assert meta.json()["disabled"] is False
++
++    disabled = await client.patch(f"/api/v1/links/{code}", json={"disabled": True})
++    assert disabled.json()["disabled"] is True
++    assert (await client.get(f"/{code}")).status_code == 410
++    await client.patch(f"/api/v1/links/{code}", json={"disabled": False})
++    assert (await client.get(f"/{code}")).status_code == 302
++
++    empty = await client.patch(f"/api/v1/links/{code}", json={})
++    assert empty.status_code == 422
++
++    assert (await client.delete(f"/api/v1/links/{code}")).status_code == 204
++    assert (await client.get(f"/api/v1/links/{code}")).status_code == 404
++    assert (await client.get(f"/{code}")).status_code == 410
++    assert (await client.delete(f"/api/v1/links/{code}")).status_code == 404
++
++
++async def test_redirect_status_is_configurable(settings: Settings) -> None:
++    from httpx import ASGITransport
++
++    from service.app import create_app
++
++    app = create_app(settings.model_copy(update={"redirect_status_code": 307}))
++    async with (
++        app.router.lifespan_context(app),
++        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
++    ):
++        code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
++        assert (await c.get(f"/{code}")).status_code == 307
+diff --git a/tests/service/test_codes.py b/tests/service/test_codes.py
+new file mode 100644
+index 0000000..b89e844
+--- /dev/null
++++ b/tests/service/test_codes.py
+@@ -0,0 +1,58 @@
++# lineage: REQ-GF-001 / implement.codes (see runs/ for the decision trail)
++import pytest
++
++from service.domain.codes import (
++    ALPHABET,
++    AliasError,
++    collision_probability,
++    decode,
++    encode,
++    generate_code,
++    normalize_alias,
++)
++
++
++@pytest.mark.parametrize(("number", "code"), [(0, "0"), (61, "z"), (62, "10"), (3843, "zz")])
++def test_encode_decode_known_values(number: int, code: str) -> None:
++    assert encode(number) == code
++    assert decode(code) == number
++
++
++def test_encode_and_decode_reject_bad_input() -> None:
++    with pytest.raises(ValueError, match="negative"):
++        encode(-1)
++    with pytest.raises(ValueError, match="empty"):
++        decode("")
++    with pytest.raises(ValueError, match="invalid base62"):
++        decode("ab!")
++
++
++def test_generated_codes_have_exact_length_and_alphabet() -> None:
++    codes = {generate_code(7) for _ in range(500)}
++    assert all(len(c) == 7 and set(c) <= set(ALPHABET) for c in codes)
++    assert len(codes) == 500  # 62^7 space: duplicates in 500 draws would be astonishing
++
++
++def test_collision_probability_matches_capacity_math() -> None:
++    assert collision_probability(0) == 0.0
++    assert collision_probability(1_000_000_000) == pytest.approx(2.84e-4, rel=0.01)
++
++
++@pytest.mark.parametrize(
++    ("alias", "canonical"),
++    [("launch-2026", "launch-2026"), ("My_Link", "my_link"), ("  abc  ", "abc")],
++)
++def test_valid_aliases_are_canonicalised(alias: str, canonical: str) -> None:
++    assert normalize_alias(alias) == canonical
++
++
++@pytest.mark.parametrize("alias", ["ab", "-start", "has space", "x" * 33, "ünïcode", "a/b"])
++def test_invalid_aliases_are_rejected(alias: str) -> None:
++    with pytest.raises(AliasError):
++        normalize_alias(alias)
++
++
++@pytest.mark.parametrize("alias", ["api", "healthz", "METRICS", "Docs"])
++def test_reserved_aliases_are_rejected(alias: str) -> None:
++    with pytest.raises(AliasError, match="reserved"):
++        normalize_alias(alias)
+diff --git a/tests/service/test_health.py b/tests/service/test_health.py
+new file mode 100644
+index 0000000..bb79fa6
+--- /dev/null
++++ b/tests/service/test_health.py
+@@ -0,0 +1,141 @@
++# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++import json
++import logging
++
++import pytest
++from fastapi import FastAPI
++from httpx import ASGITransport, AsyncClient
++
++from service.app import create_app
++from service.config import Settings
++from service.db import Database
++from service.observability import JsonFormatter, request_id_var
++
++
++async def test_liveness(client: AsyncClient) -> None:
++    resp = await client.get("/healthz")
++    assert resp.status_code == 200
++    assert resp.json() == {"status": "ok"}
++
++
++async def test_readiness_ok_and_failing_database(
++    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    assert (await client.get("/readyz")).json()["checks"]["database"] == "ok"
++
++    async def broken(self: Database) -> bool:
++        raise ConnectionError("db down")
++
++    monkeypatch.setattr(Database, "ping", broken)
++    resp = await client.get("/readyz")
++    assert resp.status_code == 503
++    assert resp.json() == {"status": "not_ready", "checks": {"database": "unavailable"}}
++
++
++async def test_security_headers_and_request_id(client: AsyncClient) -> None:
++    resp = await client.get("/healthz", headers={"X-Request-ID": "abc-123"})
++    assert resp.headers["X-Request-ID"] == "abc-123"
++    assert resp.headers["X-Content-Type-Options"] == "nosniff"
++    assert resp.headers["X-Frame-Options"] == "DENY"
++    assert resp.headers["Referrer-Policy"] == "no-referrer"
++    assert "default-src 'none'" in resp.headers["Content-Security-Policy"]
++    generated = await client.get("/healthz", headers={"X-Request-ID": "bad id with spaces!"})
++    assert generated.headers["X-Request-ID"] != "bad id with spaces!"
++    assert len(generated.headers["X-Request-ID"]) == 32
++
++
++async def test_docs_page_has_no_restrictive_csp(client: AsyncClient) -> None:
++    resp = await client.get("/docs")
++    assert resp.status_code == 200
++    assert "Content-Security-Policy" not in resp.headers
++
++
++async def test_unknown_route_uses_error_envelope(client: AsyncClient) -> None:
++    resp = await client.get("/api/v1/nothing-here")
++    assert resp.status_code == 404
++    body = resp.json()["error"]
++    assert body["code"] == "not_found"
++    assert body["request_id"] == resp.headers["X-Request-ID"]
++    wrong_method = await client.put("/healthz")
++    assert wrong_method.status_code == 405
++    assert wrong_method.json()["error"]["code"] == "method_not_allowed"
++
++
++async def test_oversized_body_is_rejected(client: AsyncClient) -> None:
++    resp = await client.post(
++        "/api/v1/links", content=b"x" * 20_000, headers={"Content-Type": "application/json"}
++    )
++    assert resp.status_code == 413
++    assert resp.json()["error"]["code"] == "payload_too_large"
++
++
++async def test_unhandled_errors_return_500_envelope(settings: Settings) -> None:
++    app: FastAPI = create_app(settings)
++
++    @app.get("/api/v1/boom")
++    async def boom() -> None:
++        raise RuntimeError("kaboom")
++
++    async with app.router.lifespan_context(app):
++        transport = ASGITransport(app=app, raise_app_exceptions=False)
++        async with AsyncClient(transport=transport, base_url="http://t") as c:
++            resp = await c.get("/api/v1/boom")
++    assert resp.status_code == 500
++    assert resp.json()["error"]["code"] == "internal_error"
++    assert "kaboom" not in resp.text
++
++
++async def test_cors_and_hsts_when_configured(settings: Settings) -> None:
++    configured = settings.model_copy(
++        update={"cors_origins": ["https://app.example.com"], "hsts_enabled": True}
++    )
++    app = create_app(configured)
++    async with (
++        app.router.lifespan_context(app),
++        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
++    ):
++        resp = await c.get("/healthz", headers={"Origin": "https://app.example.com"})
++    assert resp.headers["access-control-allow-origin"] == "https://app.example.com"
++    assert "max-age" in resp.headers["Strict-Transport-Security"]
++
++
++async def test_startup_runs_migrations_on_a_fresh_database(tmp_path: object) -> None:
++    from pathlib import Path
++
++    db = Path(str(tmp_path)) / "fresh.db"
++    app = create_app(Settings(database_url=f"sqlite+aiosqlite:///{db}", log_json=False))
++    async with (
++        app.router.lifespan_context(app),
++        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
++    ):
++        assert (await c.get("/readyz")).status_code == 200
++    assert db.exists()
++
++
++def test_json_formatter_includes_request_id_and_extras() -> None:
++    token = request_id_var.set("rid-1")
++    try:
++        record = logging.LogRecord("service.x", logging.INFO, __file__, 1, "hello %s", ("w",), None)
++        record.route = "/x"
++        out = json.loads(JsonFormatter().format(record))
++    finally:
++        request_id_var.reset(token)
++    assert out["message"] == "hello w"
++    assert out["request_id"] == "rid-1"
++    assert out["route"] == "/x"
++    assert out["level"] == "INFO"
++
++
++def test_settings_strip_trailing_slash() -> None:
++    assert Settings(base_url="https://s.io/").base_url == "https://s.io"
++
++
++def test_settings_load_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setenv("SHORTENER_REDIRECT_STATUS_CODE", "307")
++    monkeypatch.setenv("SHORTENER_CORS_ORIGINS", '["https://app.example.com"]')
++    settings = Settings()
++    assert settings.redirect_status_code == 307
++    assert settings.cors_origins == ["https://app.example.com"]
++    monkeypatch.setenv("SHORTENER_REDIRECT_STATUS_CODE", "301")
++    with pytest.raises(ValueError, match="302 or 307"):
++        Settings()
+diff --git a/tests/service/test_integration.py b/tests/service/test_integration.py
+new file mode 100644
+index 0000000..07852fa
+--- /dev/null
++++ b/tests/service/test_integration.py
+@@ -0,0 +1,106 @@
++# lineage: REQ-GF-001 / test.integration (see runs/ for the decision trail)
++"""End-to-end behaviour through the HTTP API against a migrated SQLite database."""
++
++import asyncio
++from pathlib import Path
++
++import pytest
++from alembic import command
++from alembic.config import Config
++from fastapi import FastAPI
++from httpx import AsyncClient
++from sqlalchemy import create_engine, inspect
++
++from service import links as links_module
++from service.db import ALEMBIC_INI
++from service.models import Link
++
++
++async def test_full_link_lifecycle(client: AsyncClient) -> None:
++    created = await client.post(
++        "/api/v1/links", json={"url": "https://example.com/launch", "custom_alias": "launch"}
++    )
++    assert created.status_code == 201
++    code = created.json()["code"]
++    assert (await client.get(f"/{code}")).headers["location"] == "https://example.com/launch"
++    assert (await client.patch(f"/api/v1/links/{code}", json={"disabled": True})).status_code == 200
++    assert (await client.get(f"/{code}")).status_code == 410
++    assert (await client.delete(f"/api/v1/links/{code}")).status_code == 204
++    assert (await client.get(f"/api/v1/links/{code}")).status_code == 404
++
++
++async def test_generated_codes_are_case_sensitive(app: FastAPI, client: AsyncClient) -> None:
++    """Generated base62 codes are case-sensitive: 'AbC1234' and 'abc1234' are different links."""
++    async with app.state.db.session() as session:
++        session.add(Link(code="AbC1234", target_url="https://example.com/upper", tags=[]))
++        await session.commit()
++    resp = await client.get("/AbC1234")
++    assert resp.status_code == 302
++    assert resp.headers["location"] == "https://example.com/upper"
++    assert (await client.get("/abc1234")).status_code == 404
++
++
++async def test_code_collision_retries_then_succeeds(
++    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    first = await client.post("/api/v1/links", json={"url": "https://e.com/1"})
++    taken = first.json()["code"]
++    sequence = iter([taken, taken, "Fresh01", "Fresh02", "Fresh03"])
++    monkeypatch.setattr(links_module, "generate_code", lambda length: next(sequence))
++    second = await client.post("/api/v1/links", json={"url": "https://e.com/2"})
++    assert second.status_code == 201
++    assert second.json()["code"] == "Fresh01"
++
++
++async def test_code_space_exhaustion_returns_409(
++    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    taken = (await client.post("/api/v1/links", json={"url": "https://e.com/1"})).json()["code"]
++    monkeypatch.setattr(links_module, "generate_code", lambda length: taken)
++    resp = await client.post("/api/v1/links", json={"url": "https://e.com/2"})
++    assert resp.status_code == 409
++    assert "unique code" in resp.json()["error"]["message"]
++
++
++async def test_concurrent_creates_get_distinct_codes(client: AsyncClient) -> None:
++    responses = await asyncio.gather(
++        *(client.post("/api/v1/links", json={"url": f"https://e.com/{i}"}) for i in range(20))
++    )
++    assert all(r.status_code == 201 for r in responses)
++    assert len({r.json()["code"] for r in responses}) == 20
++
++
++async def test_concurrent_idempotent_requests_create_one_link(client: AsyncClient) -> None:
++    headers = {"Idempotency-Key": "same-key"}
++    responses = await asyncio.gather(
++        *(
++            client.post("/api/v1/links", json={"url": "https://e.com/i"}, headers=headers)
++            for _ in range(5)
++        )
++    )
++    assert {r.status_code for r in responses} == {201}
++    assert len({r.json()["code"] for r in responses}) == 1
++
++
++async def test_alias_conflict_is_case_insensitive(client: AsyncClient) -> None:
++    assert (
++        await client.post("/api/v1/links", json={"url": "https://e.com", "custom_alias": "promo"})
++    ).status_code == 201
++    clash = await client.post(
++        "/api/v1/links", json={"url": "https://e.com", "custom_alias": "PROMO"}
++    )
++    assert clash.status_code == 409
++
++
++def test_migrations_upgrade_and_downgrade_cleanly(tmp_path: Path) -> None:
++    db = tmp_path / "m.db"
++    cfg = Config(str(ALEMBIC_INI))
++    cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db}")
++    command.upgrade(cfg, "head")
++    sync = create_engine(f"sqlite:///{db}")
++    assert "links" in inspect(sync).get_table_names()
++    command.downgrade(cfg, "base")
++    assert "links" not in inspect(sync).get_table_names()
++    command.upgrade(cfg, "head")
++    assert "links" in inspect(sync).get_table_names()
++    sync.dispose()
+diff --git a/tests/service/test_properties.py b/tests/service/test_properties.py
+new file mode 100644
+index 0000000..943e349
+--- /dev/null
++++ b/tests/service/test_properties.py
+@@ -0,0 +1,72 @@
++# lineage: REQ-GF-001 / test.properties (see runs/ for the decision trail)
++"""Property-based tests (hypothesis) for code generation and URL validation."""
++
++import string
++
++from hypothesis import given, settings
++from hypothesis import strategies as st
++
++from service.domain.codes import ALPHABET, AliasError, decode, encode, normalize_alias
++from service.domain.urls import UrlError, normalize_url
++
++hosts = st.from_regex(r"[a-z][a-z0-9-]{0,20}\.(com|org|io|example)", fullmatch=True)
++paths = st.lists(
++    st.text(alphabet=string.ascii_letters + string.digits + "-_.~", max_size=12), max_size=4
++)
++
++
++@given(st.integers(min_value=0, max_value=2**128))
++def test_base62_roundtrip(number: int) -> None:
++    assert decode(encode(number)) == number
++
++
++@given(
++    st.text(alphabet=ALPHABET, min_size=1, max_size=20).filter(lambda s: s[0] != "0" or s == "0")
++)
++def test_base62_decode_encode_roundtrip_without_leading_zeros(code: str) -> None:
++    assert encode(decode(code)) == code
++
++
++@given(st.integers(min_value=0, max_value=2**64), st.integers(min_value=0, max_value=2**64))
++def test_base62_preserves_order_for_equal_length_codes(a: int, b: int) -> None:
++    ea, eb = encode(a), encode(b)
++    if len(ea) == len(eb):
++        assert (ea < eb) == (a < b)
++
++
++@settings(max_examples=200)
++@given(st.sampled_from(["http", "https", "HTTP", "Https"]), hosts, paths)
++def test_normalisation_is_idempotent_and_safe(scheme: str, host: str, segments: list[str]) -> None:
++    url = f"{scheme}://{host}/" + "/".join(segments)
++    once = normalize_url(url)
++    assert normalize_url(once) == once
++    assert once.startswith(("http://", "https://"))
++    assert once.split("://", 1)[1].split("/", 1)[0] == host
++
++
++@given(st.text(max_size=200))
++def test_validator_never_accepts_non_http_schemes(text: str) -> None:
++    try:
++        result = normalize_url(text)
++    except UrlError:
++        return
++    assert result.startswith(("http://", "https://"))
++
++
++@given(st.sampled_from(["javascript", "data", "file", "vbscript", "ftp"]), st.text(max_size=50))
++def test_dangerous_schemes_always_rejected(scheme: str, rest: str) -> None:
++    try:
++        normalize_url(f"{scheme}:{rest}")
++    except UrlError:
++        return
++    raise AssertionError("dangerous scheme accepted")
++
++
++@given(st.from_regex(r"[A-Za-z0-9][A-Za-z0-9_-]{2,31}", fullmatch=True))
++def test_alias_canonical_form_is_stable(alias: str) -> None:
++    try:
++        canonical = normalize_alias(alias)
++    except AliasError:
++        return  # reserved word
++    assert canonical == alias.lower()
++    assert normalize_alias(canonical) == canonical
+diff --git a/tests/service/test_urls.py b/tests/service/test_urls.py
+new file mode 100644
+index 0000000..26d4698
+--- /dev/null
++++ b/tests/service/test_urls.py
+@@ -0,0 +1,66 @@
++# lineage: REQ-GF-001 / implement.urls (see runs/ for the decision trail)
++import pytest
++
++from service.domain.urls import UrlError, normalize_url
++
++
++@pytest.mark.parametrize(
++    ("raw", "expected"),
++    [
++        ("https://Example.COM", "https://example.com/"),
++        ("HTTP://example.com:80/a?b=1#c", "http://example.com/a?b=1#c"),
++        ("https://example.com:8443/x", "https://example.com:8443/x"),
++        ("https://bücher.example/", "https://xn--bcher-kva.example/"),
++        ("  https://example.com/path  ", "https://example.com/path"),
++        ("https://[2606:4700::1111]/", "https://[2606:4700::1111]/"),
++    ],
++)
++def test_valid_urls_are_normalised(raw: str, expected: str) -> None:
++    assert normalize_url(raw) == expected
++
++
++@pytest.mark.parametrize(
++    "raw",
++    [
++        "javascript:alert(1)",
++        "data:text/html,<script>alert(1)</script>",
++        "file:///etc/passwd",
++        "ftp://example.com/x",
++        "example.com",
++        "https://",
++        "https://user:pass@example.com/",
++        "https://example.com:99999/",
++        "https://exa mple.com/",
++        "https://example.com/\nheader",
++        "",
++    ],
++)
++def test_unsafe_or_malformed_urls_are_rejected(raw: str) -> None:
++    with pytest.raises(UrlError):
++        normalize_url(raw)
++
++
++@pytest.mark.parametrize(
++    "raw",
++    [
++        "http://127.0.0.1/",
++        "http://10.0.0.5/admin",
++        "http://192.168.1.1/",
++        "http://169.254.169.254/latest/meta-data",
++        "http://[::1]/",
++        "http://localhost:8000/",
++        "http://printer.local/",
++        "http://0.0.0.0/",
++    ],
++)
++def test_private_and_local_targets_are_rejected_by_default(raw: str) -> None:
++    with pytest.raises(UrlError):
++        normalize_url(raw)
++    assert normalize_url(raw, allow_private=True).startswith("http://")
++
++
++def test_length_limit() -> None:
++    url = "https://example.com/" + "a" * 2100
++    with pytest.raises(UrlError, match="exceeds"):
++        normalize_url(url)
++    assert normalize_url(url, max_length=4096) == url

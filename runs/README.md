@@ -5,9 +5,9 @@ Each folder is one orchestrator run (`<scenario>-<UTC timestamp>`), produced by 
 
 | Run | Scenario | Result | Highlights |
 |---|---|---|---|
-| [`greenfield-20261007T000413`](greenfield-20261007T000413/report.md) | Build the core service from an empty workspace | 14/14 nodes | parallel `implement.codes` / `implement.urls`; tests + docs branch and join at review; 2 gates |
-| [`brownfield-20261007T000441`](brownfield-20261007T000441/report.md) | Analytics, expiry, alias case bug | 14/14 nodes | impact analysis; red-first regression test; naive fix fails -> rollback -> self-repair; **human-approved migration** |
-| [`ambiguous-20261007T000933`](ambiguous-20261007T000933/report.md) | "enterprise-ready and faster" | 17/17 nodes | clarification gate; mid-run requirement change -> **dynamic re-plan** (risk medium -> high); 3 human-approved high-risk gates; p95 gate |
+| [`greenfield-20261007T002309`](greenfield-20261007T002309/report.md) | Build the core service from an empty workspace | 14/14 nodes | parallel `implement.codes` / `implement.urls`; tests + docs branch and join at review; 2 gates |
+| [`brownfield-20261007T002321`](brownfield-20261007T002321/report.md) | Analytics, expiry, alias case bug | 14/14 nodes | impact analysis; red-first regression test; naive fix fails -> rollback -> self-repair; **human-approved migration** |
+| [`ambiguous-20261007T002343`](ambiguous-20261007T002343/report.md) | "enterprise-ready and faster" | 17/17 nodes | clarification gate; mid-run requirement change -> **dynamic re-plan** (risk medium -> high); 3 human-approved high-risk gates; p95 gate |
 
 Cross-run reliability metrics: [`metrics.json`](metrics.json), [`metrics.prom`](metrics.prom) (Prometheus text).
 
