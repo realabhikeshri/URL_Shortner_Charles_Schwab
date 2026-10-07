@@ -1,0 +1,50 @@
+flowchart TD
+    intake["intake<br/><small>intake · RequirementAnalyst · risk low</small>"]
+    analysis_impact["analysis.impact<br/><small>analysis · CodebaseAnalyst · risk low</small>"]
+    plan["plan<br/><small>plan · Planner · risk low</small>"]
+    design_enterprise["design.enterprise<br/><small>design · Architect · risk low</small>"]
+    implement_enterprise_wiring["implement.enterprise_wiring<br/><small>implement · Implementer · risk medium</small>"]
+    implement_cache_backend["implement.cache_backend<br/><small>implement · Implementer · risk low</small>"]
+    implement_rate_limiter["implement.rate_limiter<br/><small>implement · Implementer · risk low</small>"]
+    implement_metrics["implement.metrics<br/><small>implement · Implementer · risk low</small>"]
+    implement_loadcheck["implement.loadcheck<br/><small>implement · Implementer · risk low</small>"]
+    test_performance["test.performance<br/><small>test · TestEngineer · risk low</small>"]
+    document_enterprise["document.enterprise<br/><small>document · DocWriter · risk low</small>"]
+    test_coverage["test.coverage<br/><small>test · TestEngineer · risk low</small>"]
+    review_code["review.code<br/><small>review · Reviewer · risk low</small>"]
+    release_readiness["release.readiness<br/><small>release_check · ReleaseManager · risk high</small>"]
+    implement_auth_migration["implement.auth_migration<br/><small>implement · Implementer · risk medium</small>"]
+    implement_api_key_auth["implement.api_key_auth<br/><small>implement · Implementer · risk high</small>"]
+    test_auth_security["test.auth_security<br/><small>test · TestEngineer · risk low</small>"]
+    intake --> analysis_impact
+    analysis_impact --> plan
+    plan --> design_enterprise
+    implement_cache_backend --> implement_enterprise_wiring
+    implement_rate_limiter --> implement_enterprise_wiring
+    implement_metrics --> implement_enterprise_wiring
+    design_enterprise --> implement_cache_backend
+    design_enterprise --> implement_rate_limiter
+    design_enterprise --> implement_metrics
+    design_enterprise --> implement_loadcheck
+    implement_enterprise_wiring --> test_performance
+    implement_loadcheck --> test_performance
+    implement_api_key_auth --> test_performance
+    implement_api_key_auth --> document_enterprise
+    implement_loadcheck --> document_enterprise
+    implement_api_key_auth --> test_coverage
+    implement_loadcheck --> test_coverage
+    test_auth_security --> test_coverage
+    document_enterprise --> review_code
+    test_coverage --> review_code
+    test_performance --> review_code
+    review_code --> release_readiness
+    design_enterprise --> implement_auth_migration
+    implement_enterprise_wiring --> implement_api_key_auth
+    implement_auth_migration --> implement_api_key_auth
+    implement_api_key_auth --> test_auth_security
+    classDef ok fill:#d1fadf,stroke:#12b76a;
+    classDef bad fill:#fee4e2,stroke:#d92d20;
+    classDef warn fill:#fef0c7,stroke:#dc6803;
+    classDef gate fill:#e0eaff,stroke:#444ce7;
+    classDef run fill:#f2f4f7,stroke:#344054;
+    classDef skip fill:#f9fafb,stroke:#98a2b3,stroke-dasharray: 4 2;

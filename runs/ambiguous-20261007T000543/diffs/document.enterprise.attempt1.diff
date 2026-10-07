@@ -1,0 +1,107 @@
+--- a/README.md
++++ b/README.md
+@@ -13,7 +13,8 @@
+ | Method | Path | Summary |
+ |---|---|---|
+ | GET | `/healthz` | Liveness probe |
+-| GET | `/readyz` | Readiness probe (database reachable) |
++| GET | `/readyz` | Readiness probe (database and cache reachable) |
++| GET | `/metrics` | metrics endpoint |
+ | POST | `/api/v1/links` | create link |
+ | GET | `/api/v1/links/{code}` | get link |
+ | PATCH | `/api/v1/links/{code}` | update link |
+@@ -35,7 +36,12 @@
+ - `SHORTENER_ANALYTICS_RETENTION_DAYS`
+ - `SHORTENER_ANALYTICS_SALT_SECRET`
+ - `SHORTENER_APP_NAME`
++- `SHORTENER_AUTH_ENABLED`
+ - `SHORTENER_BASE_URL`
++- `SHORTENER_CACHE_ENABLED`
++- `SHORTENER_CACHE_MAX_ENTRIES`
++- `SHORTENER_CACHE_NEGATIVE_TTL_S`
++- `SHORTENER_CACHE_TTL_S`
+ - `SHORTENER_CODE_LENGTH`
+ - `SHORTENER_CODE_MAX_ATTEMPTS`
+ - `SHORTENER_CORS_ORIGINS`
+@@ -48,13 +54,21 @@
+ - `SHORTENER_LOG_LEVEL`
+ - `SHORTENER_MAX_REQUEST_BODY_BYTES`
+ - `SHORTENER_MAX_URL_LENGTH`
++- `SHORTENER_METRICS_ENABLED`
++- `SHORTENER_RATE_LIMIT_ENABLED`
++- `SHORTENER_RATE_LIMIT_REDIRECT_CAPACITY`
++- `SHORTENER_RATE_LIMIT_REDIRECT_REFILL_PER_S`
++- `SHORTENER_RATE_LIMIT_WRITE_CAPACITY`
++- `SHORTENER_RATE_LIMIT_WRITE_REFILL_PER_S`
+ - `SHORTENER_REDIRECT_STATUS_CODE`
++- `SHORTENER_REDIS_URL`
+ 
+ ## Requirements implemented
+ 
+-Latest change: **REQ-BF-002 - Click analytics, link expiry and alias case bug fix**
++Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster. Update from security review: ent**
+ 
+-- GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families.
+-- Clicks are recorded off the redirect hot path; analytics failures never fail a redirect.
+-- Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect.
+-- Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive.
++- Read-through redirect cache
++- Token-bucket rate limiting
++- Prometheus metrics
++- Redirect latency target
++- API-key authentication on write endpoints
+
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,11 @@
+ - GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families. (REQ-BF-002)
+ - Clicks are recorded off the redirect hot path; analytics failures never fail a redirect. (REQ-BF-002)
+ - Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect. (REQ-BF-002)
++- Read-through redirect cache (REQ-AMBIGUOUS)
++- Token-bucket rate limiting (REQ-AMBIGUOUS)
++- Prometheus metrics (REQ-AMBIGUOUS)
++- Redirect latency target (REQ-AMBIGUOUS)
++- API-key authentication on write endpoints (REQ-AMBIGUOUS)
+ 
+ ### Fixed
+ - Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive. (REQ-BF-002)
+
+--- a/docs/service/API.md
++++ b/docs/service/API.md
+@@ -65,7 +65,7 @@
+ 
+ ## `GET /readyz`
+ 
+-Readiness probe (database reachable)
++Readiness probe (database and cache reachable)
+ 
+ Responses: `200`
+ 
+@@ -77,4 +77,4 @@
+ |---|---|---|
+ | `code` | path | True |
+ 
+-Responses: `302`, `404`, `410`, `422`
++Responses: `302`, `404`, `410`, `422`, `429`
+
+--- a/docs/openapi.json
++++ b/docs/openapi.json
+@@ -612,7 +612,7 @@
+             "description": "Successful Response"
+           }
+         },
+-        "summary": "Readiness probe (database reachable)",
++        "summary": "Readiness probe (database and cache reachable)",
+         "tags": [
+           "health"
+         ]
+@@ -653,6 +653,9 @@
+               }
+             },
+             "description": "Validation Error"
++          },
++          "429": {
++            "description": "Rate limited"
+           }
+         },
+         "summary": "Follow",

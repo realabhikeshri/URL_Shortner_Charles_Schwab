@@ -59,7 +59,7 @@ class RequirementAnalyst(Agent):
 
     async def run(self, ctx: AgentContext) -> AgentResult:
         req = ctx.context.content("requirement")
-        filename = Path(req["path"]).name
+        filename = req.get("source") or Path(req["path"]).name
         spec = await self.analyze(req["text"], filename, ctx.spec, ctx.require_llm())
         threshold = float(ctx.settings.get("ambiguity_threshold", 0.35))
         artifacts: dict[str, Any] = {"spec": spec.model_dump(mode="json")}

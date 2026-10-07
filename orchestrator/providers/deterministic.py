@@ -177,8 +177,9 @@ class DeterministicProvider(LLMProvider):
                 for cap in visible
                 for c in catalog.get("acceptance", {}).get(cap, [])
             ]
+            previous_id = previous.get("id") if isinstance(previous, dict) else None
             spec = RequirementSpec(
-                id=f"REQ-{Path(filename).stem.upper()}",
+                id=previous_id or f"REQ-{Path(filename).stem.upper()}",
                 title=goal.rstrip(".")[:80],
                 goal=goal,
                 kind="enhancement",

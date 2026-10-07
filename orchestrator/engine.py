@@ -183,7 +183,12 @@ class Orchestrator:
         for node in bootstrap_nodes:
             self.store.upsert_node(node, plan_version=0)
         text = req_copy.read_text(encoding="utf-8")
-        self.context.publish("requirement", {"text": text, "path": str(req_copy)}, node_id="human")
+        self.context.publish(
+            "requirement",
+            {"text": text, "path": str(req_copy), "source": requirement_path.name},
+            node_id="human",
+        )
+        self.store.kv_set("requirement_source", requirement_path.name)
         self.store.kv_set("requirement_hash", sha256_file(req_copy))
         root = self.decisions.record(
             node_id="requirement",
@@ -1001,8 +1006,11 @@ class Orchestrator:
                 new_spec = await self.deps.replanner.reanalyze(
                     text, old_spec, self._llm_for(replan_id)
                 )
+                source = self.store.kv_get("requirement_source", req_path.name)
                 self.context.publish(
-                    "requirement", {"text": text, "path": str(req_path)}, node_id=replan_id
+                    "requirement",
+                    {"text": text, "path": str(req_path), "source": source},
+                    node_id=replan_id,
                 )
                 self.context.publish("spec", new_spec, node_id=replan_id)
             changed_nodes = sorted(set(drifted.values()))

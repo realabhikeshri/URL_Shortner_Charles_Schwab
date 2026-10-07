@@ -107,3 +107,18 @@ the migration gate blocked; its diff was reviewed (additive DDL only, reversible
 The alias branch ran in parallel: the regression test failed first (red), the naive fix failed the targeted
 suite (`test_generated_codes_are_case_sensitive`), was rolled back, and the retry self-repaired from that
 feedback. Evidence: `runs/brownfield-20261007T000441/` (impact.json, diffs/, report).
+
+## Phase 7 — Ambiguous run (committed evidence)
+
+`make scenario-ambiguous` ("Make the shortener enterprise-ready and faster."): ambiguity score 0.65 > 0.35 ->
+clarification gate (documented default assumptions, auto-approved at medium) -> plan v1 (cache, rate limit,
+metrics, p95 target; auth deliberately *not* assumed, raised as Q-1). After `design.enterprise`, the scripted
+security-review answer amended the requirement; the engine detected the hash change, held scheduling, re-analysed
+(spec v2), asked the Planner for a delta (+3 nodes, 4 re-wired, design re-run) and, because risk rose
+medium -> high, blocked on `replan-1` until approved. The auth node (high) and release sign-off (high) were each
+reviewed and approved via the CLI. p95 6 ms vs 50 ms target. Evidence: `runs/ambiguous-*/`.
+
+**Broke / fixed:** the spec id came out as `REQ-REQUIREMENT` (derived from the run's copy of the requirement
+file) -> the requirement artifact now carries the source filename and re-analysis keeps the previous id. The
+paused run with the wrong id was discarded and the scenario re-run; replay fixtures were re-recorded because
+the analyst prompt changed.

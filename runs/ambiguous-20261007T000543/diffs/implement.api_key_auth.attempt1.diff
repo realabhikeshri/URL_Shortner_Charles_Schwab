@@ -1,0 +1,624 @@
+--- /dev/null
++++ b/service/auth.py
+@@ -0,0 +1,90 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++"""API-key authentication for write endpoints.
++
++Keys look like ``usk_<8 hex prefix>_<43 char secret>`` (256 bits of entropy). Only the SHA-256 of
++the full key is stored; the prefix is an indexed lookup handle. A slow KDF is unnecessary for keys
++with this much entropy (unlike passwords). Comparison uses ``hmac.compare_digest`` and a hash is
++computed even for unknown prefixes so failures take similar time.
++"""
++
++import hashlib
++import hmac
++import re
++import secrets
++from dataclasses import dataclass
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.db import utcnow
++from service.errors import AppError
++from service.models import ApiKey
++
++SCHEME = "usk"
++_KEY_RE = re.compile(r"^usk_([0-9a-f]{8})_([A-Za-z0-9_-]{20,64})$")
++_DUMMY_HASH = hashlib.sha256(b"dummy").hexdigest()
++
++
++class UnauthorizedError(AppError):
++    status_code = 401
++    code = "unauthorized"
++
++    def __init__(self, message: str = "a valid X-API-Key header is required") -> None:
++        super().__init__(message, headers={"WWW-Authenticate": 'ApiKey realm="url-shortener"'})
++
++
++class ForbiddenError(AppError):
++    status_code = 403
++    code = "forbidden"
++
++
++@dataclass(frozen=True)
++class IssuedKey:
++    key: str
++    prefix: str
++    key_hash: str
++
++
++def hash_key(key: str) -> str:
++    return hashlib.sha256(key.encode()).hexdigest()
++
++
++def generate_key() -> IssuedKey:
++    prefix = secrets.token_hex(4)
++    key = f"{SCHEME}_{prefix}_{secrets.token_urlsafe(32)}"
++    return IssuedKey(key=key, prefix=prefix, key_hash=hash_key(key))
++
++
++async def create_api_key(session: AsyncSession, name: str) -> str:
++    """Persist a new key and return the plaintext (shown once, never stored)."""
++    issued = generate_key()
++    session.add(ApiKey(name=name, prefix=issued.prefix, key_hash=issued.key_hash))
++    await session.commit()
++    return issued.key
++
++
++async def revoke_api_key(session: AsyncSession, prefix: str) -> bool:
++    key = (
++        await session.execute(select(ApiKey).where(ApiKey.prefix == prefix))
++    ).scalar_one_or_none()
++    if key is None or key.revoked_at is not None:
++        return False
++    key.revoked_at = utcnow()
++    await session.commit()
++    return True
++
++
++async def authenticate(session: AsyncSession, presented: str | None) -> ApiKey:
++    if not presented:
++        raise UnauthorizedError()
++    match = _KEY_RE.match(presented.strip())
++    if match is None:
++        raise UnauthorizedError("malformed API key")
++    record = (
++        await session.execute(select(ApiKey).where(ApiKey.prefix == match.group(1)))
++    ).scalar_one_or_none()
++    expected = record.key_hash if record is not None else _DUMMY_HASH
++    valid = hmac.compare_digest(hash_key(presented.strip()), expected)
++    if record is None or not valid or record.revoked_at is not None:
++        raise UnauthorizedError("invalid or revoked API key")
++    return record
+
+--- /dev/null
++++ b/service/cli.py
+@@ -0,0 +1,62 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++"""Operational CLI.
++
++python -m service.cli migrate
++python -m service.cli create-key --name ci-pipeline
++python -m service.cli list-keys
++python -m service.cli revoke-key <prefix>
++"""
++
++import argparse
++import asyncio
++import sys
++
++from sqlalchemy import select
++
++from service.auth import create_api_key, revoke_api_key
++from service.config import Settings
++from service.db import Database, migrate
++from service.models import ApiKey
++
++
++async def _run(args: argparse.Namespace, settings: Settings) -> int:
++    if args.command == "migrate":
++        await migrate(settings.database_url)
++        print("database migrated to head")
++        return 0
++    db = Database(settings.database_url)
++    try:
++        async with db.session() as session:
++            if args.command == "create-key":
++                key = await create_api_key(session, args.name)
++                print(key)
++                print("store this key now; it cannot be shown again", file=sys.stderr)
++                return 0
++            if args.command == "revoke-key":
++                ok = await revoke_api_key(session, args.prefix)
++                print("revoked" if ok else "no active key with that prefix")
++                return 0 if ok else 1
++            rows = (await session.execute(select(ApiKey).order_by(ApiKey.id))).scalars().all()
++            for row in rows:
++                state = "revoked" if row.revoked_at else "active"
++                print(f"{row.prefix}\t{row.name}\t{state}\t{row.created_at.isoformat()}")
++            return 0
++    finally:
++        await db.dispose()
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(prog="python -m service.cli")
++    sub = parser.add_subparsers(dest="command", required=True)
++    sub.add_parser("migrate", help="upgrade the database schema to head")
++    create = sub.add_parser("create-key", help="create an API key (printed once)")
++    create.add_argument("--name", required=True)
++    revoke = sub.add_parser("revoke-key", help="revoke an API key by prefix")
++    revoke.add_argument("prefix")
++    sub.add_parser("list-keys", help="list API keys (prefix, name, state)")
++    args = parser.parse_args(argv)
++    return asyncio.run(_run(args, Settings()))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+
+--- /dev/null
++++ b/tests/service/test_auth.py
+@@ -0,0 +1,95 @@
++# lineage: REQ-AMBIGUOUS / implement.api_key_auth (see runs/ for the decision trail)
++import hashlib
++import os
++
++import pytest
++from fastapi import FastAPI
++from httpx import AsyncClient
++from sqlalchemy import select
++
++from service import cli
++from service.auth import authenticate, create_api_key, generate_key, revoke_api_key
++from service.config import Settings
++from service.models import ApiKey
++
++
++async def test_write_endpoints_require_a_valid_key(app: FastAPI, anon_client: AsyncClient) -> None:
++    missing = await anon_client.post("/api/v1/links", json={"url": "https://e.com"})
++    assert missing.status_code == 401
++    assert missing.json()["error"]["code"] == "unauthorized"
++    assert missing.headers["WWW-Authenticate"].startswith("ApiKey")
++    for bad in ("garbage", "usk_zzzzzzzz_" + "a" * 43, generate_key().key):
++        resp = await anon_client.post(
++            "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": bad}
++        )
++        assert resp.status_code == 401, bad
++    async with app.state.db.session() as session:
++        revoked = await create_api_key(session, "old")
++        assert await revoke_api_key(session, revoked.split("_")[1])
++        assert not await revoke_api_key(session, revoked.split("_")[1])
++    resp = await anon_client.post(
++        "/api/v1/links", json={"url": "https://e.com"}, headers={"X-API-Key": revoked}
++    )
++    assert resp.status_code == 401
++    assert (
++        await anon_client.patch("/api/v1/links/abc", json={"disabled": True})
++    ).status_code == 401
++    assert (await anon_client.delete("/api/v1/links/abc")).status_code == 401
++
++
++async def test_read_endpoints_and_redirect_stay_public(
++    client: AsyncClient, anon_client: AsyncClient
++) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com/pub"})).json()["code"]
++    assert (await anon_client.get(f"/{code}")).status_code == 302
++    assert (await anon_client.get(f"/api/v1/links/{code}")).status_code == 200
++    assert (await anon_client.get(f"/api/v1/links/{code}/stats")).status_code == 200
++
++
++async def test_keys_are_hashed_at_rest(app: FastAPI, api_key: str) -> None:
++    async with app.state.db.session() as session:
++        rows = (await session.execute(select(ApiKey))).scalars().all()
++        assert len(rows) == 1
++        row = rows[0]
++        assert row.key_hash == hashlib.sha256(api_key.encode()).hexdigest()
++        assert api_key not in " ".join(str(v) for v in vars(row).values())
++        assert api_key.split("_")[1] == row.prefix
++        assert (await authenticate(session, api_key)).id == row.id
++
++
++async def test_cli_creates_lists_and_revokes_keys(
++    settings: Settings,
++    app: FastAPI,
++    capsys: pytest.CaptureFixture[str],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    monkeypatch.setenv("SHORTENER_DATABASE_URL", settings.database_url)
++    assert os.environ["SHORTENER_DATABASE_URL"] == settings.database_url
++    assert await _cli(["create-key", "--name", "ops"]) == 0
++    key = capsys.readouterr().out.strip()
++    assert key.startswith("usk_")
++    assert await _cli(["list-keys"]) == 0
++    listing = capsys.readouterr().out
++    assert "ops\tactive" in listing
++    assert key not in listing
++    assert await _cli(["revoke-key", key.split("_")[1]]) == 0
++    assert await _cli(["revoke-key", "ffffffff"]) == 1
++    async with app.state.db.session() as session:
++        with pytest.raises(Exception, match="revoked"):
++            await authenticate(session, key)
++
++
++async def _cli(argv: list[str]) -> int:
++    import asyncio
++
++    return await asyncio.to_thread(cli.main, argv)
++
++
++async def test_auth_can_be_disabled(settings: Settings) -> None:
++    from tests.service.test_enterprise import started
++
++    async with started(settings, auth_enabled=False) as (_app, c):
++        assert "X-API-Key" not in c.headers
++        assert (
++            await c.post("/api/v1/links", json={"url": "https://e.com/open"})
++        ).status_code == 201
+
+--- a/service/api/deps.py
++++ b/service/api/deps.py
+@@ -1,4 +1,5 @@
+-# lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.enterprise_wiring
++# lineage: REQ-GF-001 / implement.foundation,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """FastAPI dependencies shared by the routers."""
+ 
+ from collections.abc import AsyncIterator
+@@ -7,9 +8,11 @@
+ from fastapi import Depends, Request
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from service.auth import authenticate
+ from service.config import Settings
+ from service.db import Database
+ from service.links import LinkService
++from service.models import ApiKey
+ from service.ratelimit import RateLimitedError, RateLimiter, enforce
+ 
+ 
+@@ -58,13 +61,21 @@
+         raise
+ 
+ 
+-async def limit_writes(request: Request) -> None:
+-    await _limit(
+-        request,
+-        getattr(request.app.state, "write_limiter", None),
+-        f"w:{client_ip(request)}",
+-        "write",
+-    )
++async def require_api_key(
++    request: Request, session: Annotated[AsyncSession, Depends(get_session)]
++) -> ApiKey | None:
++    """Authenticate X-API-Key (None when auth is disabled by configuration)."""
++    if not get_settings(request).auth_enabled:
++        return None
++    return await authenticate(session, request.headers.get("X-API-Key"))
++
++
++async def limit_writes(
++    request: Request, key: Annotated[ApiKey | None, Depends(require_api_key)]
++) -> None:
++    """Writes are limited per API key (per client address when auth is disabled)."""
++    bucket = f"w:key:{key.id}" if key is not None else f"w:{client_ip(request)}"
++    await _limit(request, getattr(request.app.state, "write_limiter", None), bucket, "write")
+ 
+ 
+ async def limit_redirects(request: Request) -> None:
+
+--- a/service/api/links.py
++++ b/service/api/links.py
+@@ -1,16 +1,19 @@
+-# lineage: REQ-GF-001 / implement.links_api, REQ-AMBIGUOUS / implement.enterprise_wiring
++# lineage: REQ-GF-001 / implement.links_api,
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Link management API (/api/v1/links)."""
+ 
+ from typing import Annotated
+ 
+ from fastapi import APIRouter, Depends, Header, Response, status
+ 
+-from service.api.deps import get_link_service, limit_writes
++from service.api.deps import get_link_service, limit_writes, require_api_key
+ from service.links import LinkService
++from service.models import ApiKey
+ from service.schemas import LinkCreate, LinkOut, LinkUpdate
+ 
+ router = APIRouter(prefix="/api/v1/links", tags=["links"])
+ Service = Annotated[LinkService, Depends(get_link_service)]
++Caller = Annotated[ApiKey | None, Depends(require_api_key)]
+ 
+ 
+ @router.post(
+@@ -23,9 +26,11 @@
+     payload: LinkCreate,
+     response: Response,
+     service: Service,
++    caller: Caller,
+     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
+ ) -> LinkOut:
+-    link, created = await service.create(payload, idempotency_key)
++    owner = caller.id if caller is not None else None
++    link, created = await service.create(payload, idempotency_key, owner_key_id=owner)
+     if not created:
+         response.headers["Idempotent-Replayed"] = "true"
+     response.headers["Location"] = f"/api/v1/links/{link.code}"
+@@ -38,13 +43,14 @@
+ 
+ 
+ @router.patch("/{code}", response_model=LinkOut, dependencies=[Depends(limit_writes)])
+-async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
+-    return service.to_out(await service.update(code, patch))
++async def update_link(code: str, patch: LinkUpdate, service: Service, caller: Caller) -> LinkOut:
++    actor = caller.id if caller is not None else None
++    return service.to_out(await service.update(code, patch, actor_key_id=actor))
+ 
+ 
+ @router.delete(
+     "/{code}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(limit_writes)]
+ )
+-async def delete_link(code: str, service: Service) -> Response:
+-    await service.delete(code)
++async def delete_link(code: str, service: Service, caller: Caller) -> Response:
++    await service.delete(code, actor_key_id=caller.id if caller is not None else None)
+     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+--- a/service/config.py
++++ b/service/config.py
+@@ -1,5 +1,5 @@
+ # lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.analytics,
+-#          REQ-AMBIGUOUS / implement.enterprise_wiring
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Runtime configuration, loaded from the environment (prefix ``SHORTENER_``)."""
+ 
+ import secrets
+@@ -55,6 +55,8 @@
+     rate_limit_redirect_capacity: int = Field(300, ge=1)
+     rate_limit_redirect_refill_per_s: float = Field(50.0, gt=0)
+     metrics_enabled: bool = True
++    # Write endpoints require X-API-Key (redirects, metadata and stats stay public).
++    auth_enabled: bool = True
+ 
+     @field_validator("base_url")
+     @classmethod
+
+--- a/service/links.py
++++ b/service/links.py
+@@ -1,5 +1,5 @@
+ # lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry,
+-#          REQ-AMBIGUOUS / implement.enterprise_wiring
++#          REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+ 
+ import hashlib
+@@ -11,6 +11,7 @@
+ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
++from service.auth import ForbiddenError
+ from service.cache import Cache
+ from service.config import Settings
+ from service.db import utcnow
+@@ -113,7 +114,11 @@
+         )
+ 
+     async def create(
+-        self, payload: LinkCreate, idempotency_key: str | None = None
++        self,
++        payload: LinkCreate,
++        idempotency_key: str | None = None,
++        *,
++        owner_key_id: int | None = None,
+     ) -> tuple[Link, bool]:
+         """Return ``(link, created)``; ``created`` is False for an idempotent replay."""
+         try:
+@@ -127,7 +132,7 @@
+         expires_at = validate_expiry(payload.expires_at)
+         digest = fingerprint(payload)
+         if idempotency_key:
+-            replay = await self._replay(idempotency_key, digest)
++            replay = await self._replay(idempotency_key, digest, owner_key_id)
+             if replay is not None:
+                 return replay, False
+ 
+@@ -155,6 +160,7 @@
+                 is_custom=payload.custom_alias is not None,
+                 tags=list(payload.tags),
+                 expires_at=expires_at,
++                owner_key_id=owner_key_id,
+                 idempotency_key=idempotency_key,
+                 request_fingerprint=digest if idempotency_key else None,
+             )
+@@ -164,7 +170,7 @@
+             except IntegrityError:
+                 await self.session.rollback()
+                 if idempotency_key:
+-                    replay = await self._replay(idempotency_key, digest)
++                    replay = await self._replay(idempotency_key, digest, owner_key_id)
+                     if replay is not None:
+                         return replay, False
+                 if payload.custom_alias is not None:
+@@ -177,11 +183,11 @@
+             return link, True
+         raise ConflictError("could not allocate a unique code; please retry")
+ 
+-    async def _replay(self, key: str, digest: str) -> Link | None:
++    async def _replay(self, key: str, digest: str, owner_key_id: int | None) -> Link | None:
+         existing = await self.repo.get_by_idempotency_key(key)
+         if existing is None:
+             return None
+-        if existing.request_fingerprint != digest:
++        if existing.owner_key_id != owner_key_id or existing.request_fingerprint != digest:
+             raise ConflictError("Idempotency-Key was already used with a different request body")
+         return existing
+ 
+@@ -260,8 +266,18 @@
+             raise NotFoundError(f"no link with code '{code}'")
+         return link
+ 
+-    async def update(self, code: str, patch: LinkUpdate) -> Link:
++    def _authorize(self, link: Link, actor_key_id: int | None) -> None:
++        """Only the creating key may change a link (links created before auth have no owner)."""
++        if not self.settings.auth_enabled or link.owner_key_id is None:
++            return
++        if actor_key_id != link.owner_key_id:
++            raise ForbiddenError("only the API key that created this link may modify it")
++
++    async def update(
++        self, code: str, patch: LinkUpdate, *, actor_key_id: int | None = None
++    ) -> Link:
+         link = await self.get(code)
++        self._authorize(link, actor_key_id)
+         if patch.disabled is not None:
+             link.disabled = patch.disabled
+         if "expires_at" in patch.model_fields_set:
+@@ -271,8 +287,9 @@
+         await self._invalidate(link.code)
+         return link
+ 
+-    async def delete(self, code: str) -> None:
++    async def delete(self, code: str, *, actor_key_id: int | None = None) -> None:
+         link = await self.get(code)
++        self._authorize(link, actor_key_id)
+         link.deleted_at = utcnow()
+         link.updated_at = link.deleted_at
+         await self.session.commit()
+
+--- a/tests/service/conftest.py
++++ b/tests/service/conftest.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation, REQ-AMBIGUOUS / implement.api_key_auth
+ import shutil
+ from collections.abc import AsyncIterator
+ from pathlib import Path
+@@ -8,6 +8,7 @@
+ from httpx import ASGITransport, AsyncClient
+ 
+ from service.app import create_app
++from service.auth import create_api_key
+ from service.config import Settings
+ from service.db import run_migrations
+ 
+@@ -40,7 +41,31 @@
+         yield application
+ 
+ 
++async def issue_key(app: FastAPI, name: str = "test") -> str:
++    """Create an API key in the app's database (write endpoints require one)."""
++    async with app.state.db.session() as session:
++        return await create_api_key(session, name)
++
++
++def authed(app: FastAPI, key: str, base_url: str = "http://testserver") -> AsyncClient:
++    return AsyncClient(
++        transport=ASGITransport(app=app), base_url=base_url, headers={"X-API-Key": key}
++    )
++
++
+ @pytest.fixture
+-async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
++async def api_key(app: FastAPI) -> str:
++    return await issue_key(app)
++
++
++@pytest.fixture
++async def client(app: FastAPI, api_key: str) -> AsyncIterator[AsyncClient]:
++    """Authenticated client (the common case for write endpoints)."""
++    async with authed(app, api_key) as c:
++        yield c
++
++
++@pytest.fixture
++async def anon_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as c:
+         yield c
+
+--- a/tests/service/test_api_links.py
++++ b/tests/service/test_api_links.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api, REQ-AMBIGUOUS / implement.api_key_auth
+ from httpx import AsyncClient
+ 
+ from service.config import Settings
+@@ -101,14 +101,10 @@
+ 
+ 
+ async def test_redirect_status_is_configurable(settings: Settings) -> None:
+-    from httpx import ASGITransport
+-
+     from service.app import create_app
++    from tests.service.conftest import authed, issue_key
+ 
+     app = create_app(settings.model_copy(update={"redirect_status_code": 307}))
+-    async with (
+-        app.router.lifespan_context(app),
+-        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+-    ):
++    async with app.router.lifespan_context(app), authed(app, await issue_key(app), "http://t") as c:
+         code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+         assert (await c.get(f"/{code}")).status_code == 307
+
+--- a/tests/service/test_enterprise.py
++++ b/tests/service/test_enterprise.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-AMBIGUOUS / implement.enterprise_wiring (see runs/ for the decision trail)
++# lineage: REQ-AMBIGUOUS / implement.enterprise_wiring, implement.api_key_auth
+ """Caching, rate limiting, metrics and readiness wired into the running app."""
+ 
+ from collections.abc import AsyncIterator
+@@ -14,6 +14,7 @@
+ from service.app import create_app
+ from service.config import Settings
+ from service.repository import LinkRepository
++from tests.service.conftest import authed, issue_key
+ 
+ 
+ @asynccontextmanager
+@@ -21,11 +22,13 @@
+     settings: Settings, **overrides: Any
+ ) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
+     app = create_app(settings.model_copy(update=overrides))
+-    async with (
+-        app.router.lifespan_context(app),
+-        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client,
+-    ):
+-        yield app, client
++    async with app.router.lifespan_context(app):
++        if not app.state.settings.auth_enabled:
++            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
++                yield app, client
++            return
++        async with authed(app, await issue_key(app), "http://t") as client:
++            yield app, client
+ 
+ 
+ def forbid_db_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+
+--- a/tests/service/test_stats_api.py
++++ b/tests/service/test_stats_api.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-BF-002 / test.analytics (see runs/ for the decision trail)
++# lineage: REQ-BF-002 / test.analytics, REQ-AMBIGUOUS / implement.api_key_auth
+ """Stats endpoint end-to-end, and proof that analytics failures never break a redirect."""
+ 
+ from collections.abc import AsyncIterator
+@@ -96,13 +96,11 @@
+ async def test_redirect_works_with_analytics_disabled(settings: object) -> None:
+     from service.app import create_app
+     from service.config import Settings
++    from tests.service.conftest import authed, issue_key
+ 
+     assert isinstance(settings, Settings)
+     app = create_app(settings.model_copy(update={"analytics_enabled": False}))
+-    async with (
+-        app.router.lifespan_context(app),
+-        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
+-    ):
++    async with app.router.lifespan_context(app), authed(app, await issue_key(app), "http://t") as c:
+         code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
+         assert (await c.get(f"/{code}")).status_code == 302
+         assert app.state.recorder is None

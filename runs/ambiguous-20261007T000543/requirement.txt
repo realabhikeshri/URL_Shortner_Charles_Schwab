@@ -1,0 +1,5 @@
+Make the shortener enterprise-ready and faster.
+
+Update from security review: enterprise-ready requires API-key authentication on all write
+endpoints (create, update, delete). Keys must be stored hashed and only the owning key may
+modify or delete a link.

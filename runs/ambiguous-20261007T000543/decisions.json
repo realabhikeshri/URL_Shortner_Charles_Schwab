@@ -1,0 +1,298 @@
+[
+  {
+    "decision_id": "D-ba6efeb323",
+    "node_id": "requirement",
+    "agent": "human",
+    "inputs_hash": "f6fd45612207f02d07217e313ec5e0f929cd7ed462ae2b493b644a2813131aa9",
+    "rationale": "Requirement of record: ambiguous.txt",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:05:43.378902Z",
+    "parent_decision_ids": [],
+    "outcome": "accepted for processing"
+  },
+  {
+    "decision_id": "D-a1cd3031fb",
+    "node_id": "intake",
+    "agent": "RequirementAnalyst",
+    "inputs_hash": "773dc83f03e2da65563571815ba0881ecb0982db1fa97c43df9af1348ed908a8",
+    "rationale": "Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance']. Ambiguities: ['enterprise-ready', 'faster']. Assumptions: 2.",
+    "alternatives_considered": [
+      "Block until a human answers every question (safer, slower)"
+    ],
+    "timestamp": "2026-10-07T00:05:43.448056Z",
+    "parent_decision_ids": [
+      "D-ba6efeb323"
+    ],
+    "outcome": "REQ-AMBIGUOUS: 4 functional reqs, 5 acceptance criteria, ambiguity 0.65, risk medium"
+  },
+  {
+    "decision_id": "D-23e8a2db83",
+    "node_id": "analysis.impact",
+    "agent": "CodebaseAnalyst",
+    "inputs_hash": "b411d5a47ab7dd11d21fbdaf62f8fdcdee5b973651b76ad72366918084846e02",
+    "rationale": "Seeds ['service', 'service.api', 'service.api.health'] -> 5 impacted modules via the reverse import graph; routes from fastapi; migrations_needed=False; blast radius 0.182.",
+    "alternatives_considered": [
+      "grep-based impact estimate (cheaper, misses transitive importers)"
+    ],
+    "timestamp": "2026-10-07T00:05:43.774578Z",
+    "parent_decision_ids": [
+      "D-a1cd3031fb"
+    ],
+    "outcome": "5 of 26 modules impacted, 2 routes, blast radius 0.18."
+  },
+  {
+    "decision_id": "D-a0d8460b23",
+    "node_id": "plan",
+    "agent": "Planner",
+    "inputs_hash": "4e2d2bef303262a12d1a3ffceed3db64e7f42196366f85dbc6e246850b659cf6",
+    "rationale": "Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance'] decomposed from the catalog. Independent work runs in parallel (implement.cache_backend, implement.loadcheck, implement.metrics, implement.rate_limiter); tests and docs branch after implementation and join at review; release waits for review.",
+    "alternatives_considered": [
+      "Single sequential pipeline: simpler, but slower and one failure stalls everything",
+      "One mega implement node: fewer gates, far larger blast radius per failure"
+    ],
+    "timestamp": "2026-10-07T00:05:43.787012Z",
+    "parent_decision_ids": [
+      "D-23e8a2db83"
+    ],
+    "outcome": "plan with 11 nodes, risk medium"
+  },
+  {
+    "decision_id": "D-51fbd31c0e",
+    "node_id": "design.enterprise",
+    "agent": "Architect",
+    "inputs_hash": "3c33bab50478f75a8aa04bed34edf17e0ac2cd188cf7c0434f3487ccd4f3f666",
+    "rationale": "Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate for state changes; Per API key for writes, per client IP for redirects: fairness for authenticated clients, abuse protection for public traffic; 429 with Retry-After and X-RateLimit-* headers: standard, client-friendly back-off signal; Per-app CollectorRegistry: isolated in tests, no global state; p95 < 50 ms @ 20 concurrent clients (laptop, SQLite) enforced as a gate: a concrete, repeatable number replaces 'faster'",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:05:43.812182Z",
+    "parent_decision_ids": [
+      "D-a0d8460b23"
+    ],
+    "outcome": "design with 4 components, 6 decisions"
+  },
+  {
+    "decision_id": "D-c2b20b29bb",
+    "node_id": "replan-1",
+    "agent": "Planner",
+    "inputs_hash": "02cae9d23d34bb88cf3afb3c1ddd8752dbb2565475790fe781088b29d0461e8a",
+    "rationale": "Requirement v2 adds capabilities ['api_key_auth', 'auth_schema'] (risk medium -> high); design must be revisited and 3 node(s) added, 4 re-wired.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:05:43.886039Z",
+    "parent_decision_ids": [
+      "D-a0d8460b23"
+    ],
+    "outcome": "+3 nodes, -0, ~4, rerun ['design.enterprise', 'document.enterprise', 'release.readiness', 'test.coverage', 'test.performance']"
+  },
+  {
+    "decision_id": "D-f12531c40e",
+    "node_id": "design.enterprise",
+    "agent": "Architect",
+    "inputs_hash": "3c33bab50478f75a8aa04bed34edf17e0ac2cd188cf7c0434f3487ccd4f3f666",
+    "rationale": "Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate for state changes; Per API key for writes, per client IP for redirects: fairness for authenticated clients, abuse protection for public traffic; 429 with Retry-After and X-RateLimit-* headers: standard, client-friendly back-off signal; Per-app CollectorRegistry: isolated in tests, no global state; p95 < 50 ms @ 20 concurrent clients (laptop, SQLite) enforced as a gate: a concrete, repeatable number replaces 'faster'; Opaque random keys hashed with SHA-256 (keys have 256 bits of entropy, so a slow KDF adds nothing): fast verification on every write without storing secrets; Owner-only PATCH/DELETE: prevents one tenant modifying another tenant's links",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:05:49.777782Z",
+    "parent_decision_ids": [
+      "D-a0d8460b23"
+    ],
+    "outcome": "design with 6 components, 8 decisions"
+  },
+  {
+    "decision_id": "D-bc05dae184",
+    "node_id": "implement.cache_backend",
+    "agent": "Implementer",
+    "inputs_hash": "9ae16b534e82e29dde4b5fb3acd8576e8f235cee0960e93dcfa39519f7451873",
+    "rationale": "One protocol, two backends: the in-memory LRU keeps the single-process default dependency-free, Redis shares state across replicas. Values are small JSON strings; TTLs are enforced per entry.",
+    "alternatives_considered": [
+      "cachetools TTLCache: rejected, a new dependency for 40 lines of code"
+    ],
+    "timestamp": "2026-10-07T00:05:49.854048Z",
+    "parent_decision_ids": [
+      "D-f12531c40e"
+    ],
+    "outcome": "Cache abstraction - bounded in-memory TTL LRU and a Redis backend"
+  },
+  {
+    "decision_id": "D-4280e6b89b",
+    "node_id": "implement.rate_limiter",
+    "agent": "Implementer",
+    "inputs_hash": "38974a8fa27d737f128db0f8547bafe191bc11304dfc1a59c111d1dd889e495c",
+    "rationale": "Token buckets allow short bursts while bounding sustained rate. The Redis variant runs the read-modify-write in a Lua script so concurrent replicas cannot double-spend tokens.",
+    "alternatives_considered": [
+      "Fixed-window INCR/EXPIRE: rejected, allows 2x bursts at window edges",
+      "Sliding log: rejected, O(requests) memory per key"
+    ],
+    "timestamp": "2026-10-07T00:05:49.873993Z",
+    "parent_decision_ids": [
+      "D-f12531c40e"
+    ],
+    "outcome": "Token-bucket rate limiter (in-memory, Redis via atomic Lua) with 429 + Retry-After"
+  },
+  {
+    "decision_id": "D-255ca01363",
+    "node_id": "implement.metrics",
+    "agent": "Implementer",
+    "inputs_hash": "1716178816ff5e4051ceb3bc59ca9827806b489373153357c45dd961a90f5499",
+    "rationale": "Labels use the route template (/{code}), never the raw path, so cardinality stays bounded. A per-app CollectorRegistry avoids global state and duplicate-registration errors in tests.",
+    "alternatives_considered": [
+      "OpenTelemetry metrics SDK: deferred, Prometheus text is what the platform scrapes"
+    ],
+    "timestamp": "2026-10-07T00:05:49.894524Z",
+    "parent_decision_ids": [
+      "D-f12531c40e"
+    ],
+    "outcome": "Prometheus metrics (per-app registry) and ASGI middleware labelled by route template"
+  },
+  {
+    "decision_id": "D-f74e53977d",
+    "node_id": "implement.loadcheck",
+    "agent": "Implementer",
+    "inputs_hash": "1da19e19a4ae7081788a2c5d033bd7415a2f71ed828ead82f86a61f14cf77c5e",
+    "rationale": "Turns \"faster\" into a measurable, repeatable number. Links are seeded through the service layer, the server runs as a separate process, and each concurrent worker owns its own HTTP connection so the measurement is not dominated by client-side connection-pool contention.",
+    "alternatives_considered": [
+      "In-process ASGI client: rejected, hides network and server overhead"
+    ],
+    "timestamp": "2026-10-07T00:05:49.916367Z",
+    "parent_decision_ids": [
+      "D-f12531c40e"
+    ],
+    "outcome": "Load-sanity script measuring redirect p50/p95/p99 against a real uvicorn process"
+  },
+  {
+    "decision_id": "D-d4cc46960c",
+    "node_id": "implement.auth_migration",
+    "agent": "Implementer",
+    "inputs_hash": "66ae4ae478e423d472447cc6cee723ac4d0bcec0cfeab21578e7aa491b6ce6f4",
+    "rationale": "Additive and reversible. Existing links keep owner_key_id NULL (no owner) so they remain manageable after auth is enabled; new links record the creating key.",
+    "alternatives_considered": [
+      "Backfill an owner for existing links: rejected, no truthful owner exists"
+    ],
+    "timestamp": "2026-10-07T00:05:50.178280Z",
+    "parent_decision_ids": [
+      "D-f12531c40e"
+    ],
+    "outcome": "Migration 0003 - api_keys table and links.owner_key_id (FK, SET NULL)"
+  },
+  {
+    "decision_id": "D-7751e76b93",
+    "node_id": "implement.enterprise_wiring",
+    "agent": "Implementer",
+    "inputs_hash": "82d4b2f9ab67b8593f97f634fd14f3cbb188a7c2f04d8f83a6262b9eed2f4b76",
+    "rationale": "Redirects resolve through a read-through cache keyed by canonical code (aliases look up their lower-case entry; only canonical misses are negatively cached), invalidated on create/update/delete. Cache errors degrade to the database. Writes and redirects are rate limited per client; readiness now covers the cache; /metrics exposes request, redirect, cache, rate-limit and analytics gauges. Adds redis and prometheus-client as runtime dependencies (approval required).",
+    "alternatives_considered": [
+      "Cache the full Link row: rejected, larger payloads and more invalidation surface",
+      "Write-through cache: rejected, invalidation is simpler and links change rarely"
+    ],
+    "timestamp": "2026-10-07T00:05:51.104426Z",
+    "parent_decision_ids": [
+      "D-bc05dae184",
+      "D-4280e6b89b",
+      "D-255ca01363"
+    ],
+    "outcome": "Wire read-through cache, rate limits and metrics into config, app, routes and LinkService"
+  },
+  {
+    "decision_id": "D-1ee241cf41",
+    "node_id": "implement.api_key_auth",
+    "agent": "Implementer",
+    "inputs_hash": "775331c31fd6dd86abf17cc3f4c3408ade4504686a0eb49ad671aaf1865deaea",
+    "rationale": "Opaque 256-bit keys with an indexed prefix, compared in constant time, revocable, never logged. Writes are rate limited per key. Only the creating key may PATCH/DELETE a link (403 otherwise). Redirects, metadata and stats stay public. Existing tests are updated to authenticate.",
+    "alternatives_considered": [
+      "JWT bearer tokens: rejected, needs an issuer and key rotation story for no added value here",
+      "bcrypt/argon2 for key hashes: rejected, unnecessary for high-entropy random keys and slow per request"
+    ],
+    "timestamp": "2026-10-07T00:05:52.536431Z",
+    "parent_decision_ids": [
+      "D-7751e76b93",
+      "D-d4cc46960c"
+    ],
+    "outcome": "X-API-Key required on write endpoints; keys SHA-256 hashed at rest; owner-only modification; key CLI"
+  },
+  {
+    "decision_id": "D-2a5d906ff8",
+    "node_id": "test.auth_security",
+    "agent": "TestEngineer",
+    "inputs_hash": "238e8284af7b8716ebc21cc9c6709d0c756fe94fe0864e6902cb14f3338c899c",
+    "rationale": "Attack-oriented tests for the new trust boundary, independent of the implementer's own tests.",
+    "alternatives_considered": [
+      "Rely on the implementer's tests: rejected, separation of duties"
+    ],
+    "timestamp": "2026-10-07T00:06:00.905369Z",
+    "parent_decision_ids": [
+      "D-1ee241cf41"
+    ],
+    "outcome": "Abuse tests - cross-tenant modification, malformed keys, idempotency scoping, per-key limits, no keys in logs"
+  },
+  {
+    "decision_id": "D-72c3cce764",
+    "node_id": "document.enterprise",
+    "agent": "DocWriter",
+    "inputs_hash": "4fb261418ef8d360c87159e0a8abac2b38a718a89cbd826b8dc4936ec3a4bd91",
+    "rationale": "API reference and OpenAPI are generated from the running app, so they cannot drift from the code.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:06:01.284151Z",
+    "parent_decision_ids": [
+      "D-1ee241cf41",
+      "D-f74e53977d"
+    ],
+    "outcome": "docs for 9 routes; 5 changelog entries"
+  },
+  {
+    "decision_id": "D-96ae3d6549",
+    "node_id": "test.coverage",
+    "agent": "TestEngineer",
+    "inputs_hash": "8578079ae56424e19415aba49e9613b62a7ddb0347fa0c38615d87706a41ebfc",
+    "rationale": "Coverage is measured by the independent coverage gate, not self-reported.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:06:02.490731Z",
+    "parent_decision_ids": [
+      "D-1ee241cf41",
+      "D-f74e53977d",
+      "D-2a5d906ff8"
+    ],
+    "outcome": "154 tests collected across 18 modules"
+  },
+  {
+    "decision_id": "D-6e2d7a0e4f",
+    "node_id": "test.performance",
+    "agent": "TestEngineer",
+    "inputs_hash": "2914cad04fef7140d616eeca87a66f5b53ec8a47854432f5498d054f64be2cdb",
+    "rationale": "Measured against a real uvicorn process over HTTP (not in-process).",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:06:02.691684Z",
+    "parent_decision_ids": [
+      "D-7751e76b93",
+      "D-f74e53977d",
+      "D-1ee241cf41"
+    ],
+    "outcome": "redirect p50 5.3 ms, p95 6.4 ms (target 50.0 ms)"
+  },
+  {
+    "decision_id": "D-5d394b669d",
+    "node_id": "review.code",
+    "agent": "Reviewer",
+    "inputs_hash": "1243f624675542a2d14824f36a4b753bfcabb529889be7a829eeddafd8812cd5",
+    "rationale": "8/8 acceptance criteria verified by passing tests; 33 files changed.",
+    "alternatives_considered": [
+      "Approve on LLM judgement alone (rejected: approvals require test evidence)"
+    ],
+    "timestamp": "2026-10-07T00:06:09.367336Z",
+    "parent_decision_ids": [
+      "D-72c3cce764",
+      "D-96ae3d6549",
+      "D-6e2d7a0e4f"
+    ],
+    "outcome": "review approve: 8/8 acceptance criteria verified by passing tests; 33 files changed."
+  },
+  {
+    "decision_id": "D-51d5e9c0ed",
+    "node_id": "release.readiness",
+    "agent": "ReleaseManager",
+    "inputs_hash": "aec15d2359a733afcc0bdb1089de7663b842298e271793aa4fad0caadbb218fd",
+    "rationale": "REQ-AMBIGUOUS: Make the shortener enterprise-ready and faster. Update from security review: enterprise-ready requires API-key authentication on all write endpoints (create, update, delete). Keys must be stored hashed and only the owning key may modify or delete a link.",
+    "alternatives_considered": [],
+    "timestamp": "2026-10-07T00:06:10.091287Z",
+    "parent_decision_ids": [
+      "D-5d394b669d"
+    ],
+    "outcome": "release READY: 5/5"
+  }
+]
