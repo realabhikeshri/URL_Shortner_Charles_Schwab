@@ -1,0 +1,182 @@
+--- /dev/null
++++ b/tests/service/test_expiry.py
+@@ -0,0 +1,62 @@
++# lineage: REQ-BF-002 / implement.expiry (see runs/ for the decision trail)
++from datetime import UTC, datetime, timedelta
++
++from fastapi import FastAPI
++from httpx import AsyncClient
++from sqlalchemy import update
++
++from service.models import Link
++
++
++def future(hours: int = 1) -> str:
++    return (datetime.now(UTC) + timedelta(hours=hours)).isoformat()
++
++
++async def test_expires_at_round_trips_and_link_works_until_then(client: AsyncClient) -> None:
++    resp = await client.post(
++        "/api/v1/links", json={"url": "https://e.com/t", "expires_at": future()}
++    )
++    assert resp.status_code == 201
++    body = resp.json()
++    assert body["expires_at"] is not None
++    assert body["is_expired"] is False
++    assert (await client.get(f"/{body['code']}")).status_code == 302
++
++
++async def test_expired_link_returns_410(app: FastAPI, client: AsyncClient) -> None:
++    code = (
++        await client.post("/api/v1/links", json={"url": "https://e.com/x", "expires_at": future()})
++    ).json()["code"]
++    async with app.state.db.session() as session:
++        await session.execute(
++            update(Link)
++            .where(Link.code == code)
++            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
++        )
++        await session.commit()
++    resp = await client.get(f"/{code}")
++    assert resp.status_code == 410
++    assert "expired" in resp.json()["error"]["message"]
++    meta = await client.get(f"/api/v1/links/{code}")
++    assert meta.status_code == 200
++    assert meta.json()["is_expired"] is True
++
++
++async def test_invalid_expiry_values_are_rejected(client: AsyncClient) -> None:
++    past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
++    assert (
++        await client.post("/api/v1/links", json={"url": "https://e.com", "expires_at": past})
++    ).status_code == 422
++    naive = datetime.now().replace(microsecond=0).isoformat()
++    assert (
++        await client.post("/api/v1/links", json={"url": "https://e.com", "expires_at": naive})
++    ).status_code == 422
++
++
++async def test_patch_sets_and_clears_expiry(client: AsyncClient) -> None:
++    code = (await client.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
++    set_resp = await client.patch(f"/api/v1/links/{code}", json={"expires_at": future(5)})
++    assert set_resp.json()["expires_at"] is not None
++    cleared = await client.patch(f"/api/v1/links/{code}", json={"expires_at": None})
++    assert cleared.json()["expires_at"] is None
++    assert (await client.get(f"/{code}")).status_code == 302
+
+--- a/service/links.py
++++ b/service/links.py
+@@ -1,8 +1,9 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
+ """Link use cases: create (idempotent), resolve, read, update, soft-delete."""
+ 
+ import hashlib
+ import json
++from datetime import datetime
+ 
+ from sqlalchemy.exc import IntegrityError
+ from sqlalchemy.ext.asyncio import AsyncSession
+@@ -18,6 +19,20 @@
+ from service.schemas import LinkCreate, LinkOut, LinkUpdate
+ 
+ log = get_logger("links")
++
++
++def is_expired(link: Link, now: datetime | None = None) -> bool:
++    return link.expires_at is not None and link.expires_at <= (now or utcnow())
++
++
++def validate_expiry(value: datetime | None) -> datetime | None:
++    if value is None:
++        return None
++    if value.tzinfo is None:
++        raise InvalidInputError("expires_at must include a timezone offset")
++    if value <= utcnow():
++        raise InvalidInputError("expires_at must be in the future")
++    return value
+ 
+ 
+ def fingerprint(payload: LinkCreate) -> str:
+@@ -41,6 +56,8 @@
+             disabled=link.disabled,
+             created_at=link.created_at,
+             updated_at=link.updated_at,
++            expires_at=link.expires_at,
++            is_expired=is_expired(link),
+         )
+ 
+     async def create(
+@@ -55,6 +72,7 @@
+             )
+         except UrlError as exc:
+             raise InvalidInputError(str(exc)) from exc
++        expires_at = validate_expiry(payload.expires_at)
+         digest = fingerprint(payload)
+         if idempotency_key:
+             replay = await self._replay(idempotency_key, digest)
+@@ -84,6 +102,7 @@
+                 target_url=target,
+                 is_custom=payload.custom_alias is not None,
+                 tags=list(payload.tags),
++                expires_at=expires_at,
+                 idempotency_key=idempotency_key,
+                 request_fingerprint=digest if idempotency_key else None,
+             )
+@@ -114,12 +133,14 @@
+         return existing
+ 
+     async def resolve(self, code: str) -> Link:
+-        """Look up a link for redirecting; raises 404 for unknown and 410 for gone links."""
++        """Look up a link for redirecting; 404 for unknown, 410 for disabled/deleted/expired."""
+         link = await self.repo.get_by_code(code)
+         if link is None:
+             raise NotFoundError(f"no link with code '{code}'")
+         if link.deleted_at is not None or link.disabled:
+             raise GoneError(f"link '{code}' is no longer available")
++        if is_expired(link):
++            raise GoneError(f"link '{code}' has expired")
+         return link
+ 
+     async def get(self, code: str) -> Link:
+@@ -132,6 +153,8 @@
+         link = await self.get(code)
+         if patch.disabled is not None:
+             link.disabled = patch.disabled
++        if "expires_at" in patch.model_fields_set:
++            link.expires_at = validate_expiry(patch.expires_at)
+         link.updated_at = utcnow()
+         await self.session.commit()
+         return link
+
+--- a/service/schemas.py
++++ b/service/schemas.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.expiry
+ """Public API models."""
+ 
+ from datetime import datetime
+@@ -15,12 +15,16 @@
+     url: str = Field(min_length=1, max_length=8192, examples=["https://example.com/docs"])
+     custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
+     tags: list[Tag] = Field(default_factory=list, max_length=10)
++    expires_at: datetime | None = Field(
++        None, description="Timezone-aware expiry (must be in the future)"
++    )
+ 
+ 
+ class LinkUpdate(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+ 
+     disabled: bool | None = None
++    expires_at: datetime | None = Field(None, description="Set a new expiry; null clears it")
+ 
+     @model_validator(mode="after")
+     def _not_empty(self) -> "LinkUpdate":
+@@ -38,3 +42,5 @@
+     disabled: bool
+     created_at: datetime
+     updated_at: datetime
++    expires_at: datetime | None = None
++    is_expired: bool = False

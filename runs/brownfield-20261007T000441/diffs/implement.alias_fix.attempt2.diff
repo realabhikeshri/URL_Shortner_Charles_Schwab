@@ -1,0 +1,29 @@
+--- a/service/repository.py
++++ b/service/repository.py
+@@ -1,4 +1,4 @@
+-# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.links_api, REQ-BF-002 / implement.alias_fix
+ """Data access for links."""
+ 
+ from sqlalchemy import func, select
+@@ -12,8 +12,19 @@
+         self.session = session
+ 
+     async def get_by_code(self, code: str) -> Link | None:
++        """Exact match first (generated codes are case-sensitive), then the canonical alias.
++
++        Aliases are stored lower-cased, so a lower-cased lookup restricted to custom links makes
++        aliases case-insensitive without ever folding generated base62 codes (REQ-BF-002).
++        """
+         result = await self.session.execute(select(Link).where(Link.code == code))
+-        return result.scalar_one_or_none()
++        link = result.scalar_one_or_none()
++        if link is None and code != code.lower():
++            alias = await self.session.execute(
++                select(Link).where(Link.code == code.lower(), Link.is_custom.is_(True))
++            )
++            link = alias.scalar_one_or_none()
++        return link
+ 
+     async def code_exists(self, code: str) -> bool:
+         result = await self.session.execute(select(Link.id).where(Link.code == code))

@@ -1,0 +1,47 @@
+--- /dev/null
++++ b/docs/design/analytics.md
+@@ -0,0 +1,44 @@
++# Design - Click analytics, link expiry and alias case bug fix
++
++Requirement: **REQ-BF-002** (v1, risk medium)
++
++## Summary
++
++Add click analytics (stats endpoint with daily breakdown, referrers, unique visitors) and link expiry, and fix the bug where custom aliases are case-sensitive in lookups but not in creation. Impact analysis: 10 of 23 modules impacted, 7 routes, blast radius 0.68.
++
++## Components
++
++- service.repository.LinkRepository.get_by_code - exact match, then canonical alias match
++- LinkCreate/LinkUpdate.expires_at, LinkOut.is_expired
++- LinkService.resolve raises 410 for expired links
++- service.analytics - ClickRecorder (bounded asyncio queue + background batch writer), visitor hashing, UA/referrer parsing, stats queries, retention purge
++- service.api.stats - GET /api/v1/links/{code}/stats
++
++## Decisions
++
++| Decision | Rationale / rejected alternative |
++|---|---|
++| Exact match first, then lower-cased match restricted to is_custom rows | keeps generated base62 codes case-sensitive while making aliases case-insensitive |
++| Expiry evaluated at read time | no background job needed; exact to the request |
++| In-process bounded queue + batch writer | keeps DB writes off the redirect path; drops (and counts) on overflow instead of adding latency |
++| visitor = sha256(HMAC(secret, day) + ip + ua) | unique visitors per day without storing PII; salts rotate daily so hashes cannot be joined across days |
++| Retention purge on a timer (analytics_retention_days) | compliance policy CMP-003 |
++
++## Data model
++
++- `no schema change (aliases are already stored in canonical lower case)`
++- `links.expires_at TIMESTAMPTZ NULL`
++- `clicks(id, link_id FK, occurred_at, day, visitor_hash, referrer_host, ua_family)`
++
++## Risks and assumptions
++
++- Schema migration on a live table: additive and reversible only; gated by approval.
++
++## Acceptance criteria
++
++- **AC-1** Given a custom alias created as 'MyLink', when a client requests /MyLink or /mylink, then both redirect to the target.
++- **AC-2** Given a generated code with mixed case, when a client requests it with different casing, then only the exact code resolves.
++- **AC-3** Given a link with expires_at in the past, when a client follows it, then the service returns 410 and metadata reports is_expired.
++- **AC-4** Given several redirects from different visitors and referrers, when a client requests the stats endpoint, then totals, unique visitors, daily breakdown, referrers and user-agent families are correct.
++- **AC-5** Given the analytics store is failing, when a client follows a link, then the redirect still succeeds.
++- **AC-6** Given recorded clicks, when the database is inspected, then no raw IP address or user agent is stored.

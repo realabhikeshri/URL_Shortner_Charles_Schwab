@@ -1,0 +1,334 @@
+--- a/README.md
++++ b/README.md
+@@ -18,6 +18,7 @@
+ | GET | `/api/v1/links/{code}` | get link |
+ | PATCH | `/api/v1/links/{code}` | update link |
+ | DELETE | `/api/v1/links/{code}` | delete link |
++| GET | `/api/v1/links/{code}/stats` | Click statistics |
+ | GET | `/{code}` | follow |
+ 
+ Full reference: `docs/service/API.md`; OpenAPI: `docs/openapi.json`.
+@@ -27,6 +28,12 @@
+ All settings are environment variables with the `SHORTENER_` prefix:
+ 
+ - `SHORTENER_ALLOW_PRIVATE_HOSTS`
++- `SHORTENER_ANALYTICS_BATCH_SIZE`
++- `SHORTENER_ANALYTICS_ENABLED`
++- `SHORTENER_ANALYTICS_PURGE_INTERVAL_S`
++- `SHORTENER_ANALYTICS_QUEUE_SIZE`
++- `SHORTENER_ANALYTICS_RETENTION_DAYS`
++- `SHORTENER_ANALYTICS_SALT_SECRET`
+ - `SHORTENER_APP_NAME`
+ - `SHORTENER_BASE_URL`
+ - `SHORTENER_CODE_LENGTH`
+@@ -45,10 +52,9 @@
+ 
+ ## Requirements implemented
+ 
+-Latest change: **REQ-GF-001 - URL shortener core service**
++Latest change: **REQ-BF-002 - Click analytics, link expiry and alias case bug fix**
+ 
+-- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.
+-- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.
+-- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.
+-- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.
+-- Persist links in a relational database managed by reversible migrations.
++- GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families.
++- Clicks are recorded off the redirect hot path; analytics failures never fail a redirect.
++- Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect.
++- Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive.
+
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -10,3 +10,9 @@
+ - Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE. (REQ-GF-001)
+ - Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes. (REQ-GF-001)
+ - Persist links in a relational database managed by reversible migrations. (REQ-GF-001)
++- GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families. (REQ-BF-002)
++- Clicks are recorded off the redirect hot path; analytics failures never fail a redirect. (REQ-BF-002)
++- Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect. (REQ-BF-002)
++
++### Fixed
++- Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive. (REQ-BF-002)
+
+--- a/docs/service/API.md
++++ b/docs/service/API.md
+@@ -46,6 +46,17 @@
+ 
+ Responses: `200`, `422`
+ 
++## `GET /api/v1/links/{code}/stats`
++
++Click statistics
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++| `days` | query | False |
++
++Responses: `200`, `422`
++
+ ## `GET /healthz`
+ 
+ Liveness probe
+
+--- a/docs/openapi.json
++++ b/docs/openapi.json
+@@ -1,6 +1,29 @@
+ {
+   "components": {
+     "schemas": {
++      "DayStats": {
++        "properties": {
++          "clicks": {
++            "title": "Clicks",
++            "type": "integer"
++          },
++          "day": {
++            "title": "Day",
++            "type": "string"
++          },
++          "unique_visitors": {
++            "title": "Unique Visitors",
++            "type": "integer"
++          }
++        },
++        "required": [
++          "day",
++          "clicks",
++          "unique_visitors"
++        ],
++        "title": "DayStats",
++        "type": "object"
++      },
+       "HTTPValidationError": {
+         "properties": {
+           "detail": {
+@@ -31,6 +54,19 @@
+               "launch-2026"
+             ],
+             "title": "Custom Alias"
++          },
++          "expires_at": {
++            "anyOf": [
++              {
++                "format": "date-time",
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "description": "Timezone-aware expiry (must be in the future)",
++            "title": "Expires At"
+           },
+           "tags": {
+             "items": {
+@@ -74,8 +110,25 @@
+             "title": "Disabled",
+             "type": "boolean"
+           },
++          "expires_at": {
++            "anyOf": [
++              {
++                "format": "date-time",
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Expires At"
++          },
+           "is_custom": {
+             "title": "Is Custom",
++            "type": "boolean"
++          },
++          "is_expired": {
++            "default": false,
++            "title": "Is Expired",
+             "type": "boolean"
+           },
+           "short_url": {
+@@ -112,6 +165,58 @@
+         "title": "LinkOut",
+         "type": "object"
+       },
++      "LinkStats": {
++        "properties": {
++          "clicks_by_day": {
++            "items": {
++              "$ref": "#/components/schemas/DayStats"
++            },
++            "title": "Clicks By Day",
++            "type": "array"
++          },
++          "code": {
++            "title": "Code",
++            "type": "string"
++          },
++          "top_referrers": {
++            "items": {
++              "$ref": "#/components/schemas/Referrer"
++            },
++            "title": "Top Referrers",
++            "type": "array"
++          },
++          "top_user_agents": {
++            "items": {
++              "$ref": "#/components/schemas/UserAgentFamily"
++            },
++            "title": "Top User Agents",
++            "type": "array"
++          },
++          "total_clicks": {
++            "title": "Total Clicks",
++            "type": "integer"
++          },
++          "unique_visitors": {
++            "title": "Unique Visitors",
++            "type": "integer"
++          },
++          "window_days": {
++            "title": "Window Days",
++            "type": "integer"
++          }
++        },
++        "required": [
++          "code",
++          "window_days",
++          "total_clicks",
++          "unique_visitors",
++          "clicks_by_day",
++          "top_referrers",
++          "top_user_agents"
++        ],
++        "title": "LinkStats",
++        "type": "object"
++      },
+       "LinkUpdate": {
+         "additionalProperties": false,
+         "properties": {
+@@ -125,9 +230,58 @@
+               }
+             ],
+             "title": "Disabled"
++          },
++          "expires_at": {
++            "anyOf": [
++              {
++                "format": "date-time",
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "description": "Set a new expiry; null clears it",
++            "title": "Expires At"
+           }
+         },
+         "title": "LinkUpdate",
++        "type": "object"
++      },
++      "Referrer": {
++        "properties": {
++          "clicks": {
++            "title": "Clicks",
++            "type": "integer"
++          },
++          "host": {
++            "title": "Host",
++            "type": "string"
++          }
++        },
++        "required": [
++          "host",
++          "clicks"
++        ],
++        "title": "Referrer",
++        "type": "object"
++      },
++      "UserAgentFamily": {
++        "properties": {
++          "clicks": {
++            "title": "Clicks",
++            "type": "integer"
++          },
++          "family": {
++            "title": "Family",
++            "type": "string"
++          }
++        },
++        "required": [
++          "family",
++          "clicks"
++        ],
++        "title": "UserAgentFamily",
+         "type": "object"
+       },
+       "ValidationError": {
+@@ -363,6 +517,63 @@
+         ]
+       }
+     },
++    "/api/v1/links/{code}/stats": {
++      "get": {
++        "description": "Unique visitors are counted per day (daily-salted hashes) and summed over the window.",
++        "operationId": "stats_api_v1_links__code__stats_get",
++        "parameters": [
++          {
++            "in": "path",
++            "name": "code",
++            "required": true,
++            "schema": {
++              "title": "Code",
++              "type": "string"
++            }
++          },
++          {
++            "description": "Window size in days",
++            "in": "query",
++            "name": "days",
++            "required": false,
++            "schema": {
++              "default": 30,
++              "description": "Window size in days",
++              "maximum": 365,
++              "minimum": 1,
++              "title": "Days",
++              "type": "integer"
++            }
++          }
++        ],
++        "responses": {
++          "200": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/LinkStats"
++                }
++              }
++            },
++            "description": "Successful Response"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Click statistics",
++        "tags": [
++          "analytics"
++        ]
++      }
++    },
+     "/healthz": {
+       "get": {
+         "operationId": "healthz_healthz_get",

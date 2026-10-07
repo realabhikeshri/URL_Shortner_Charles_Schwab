@@ -1,0 +1,124 @@
+--- /dev/null
++++ b/service/migrations/versions/rev_0002_clicks_and_expiry.py
+@@ -0,0 +1,47 @@
++# lineage: REQ-BF-002 / implement.migration_0002 (see runs/ for the decision trail)
++"""Add links.expires_at and the clicks table (additive, reversible).
++
++Revision ID: 0002
++Revises: 0001
++Create Date: 2026-10-07
++"""
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "0002"
++down_revision: str | None = "0001"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    with op.batch_alter_table("links") as batch:
++        batch.add_column(sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True))
++    op.create_table(
++        "clicks",
++        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column(
++            "link_id",
++            sa.Integer(),
++            sa.ForeignKey("links.id", ondelete="CASCADE", name="fk_clicks_link_id"),
++            nullable=False,
++        ),
++        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
++        sa.Column("day", sa.Date(), nullable=False),
++        sa.Column("visitor_hash", sa.String(length=64), nullable=False),
++        sa.Column("referrer_host", sa.String(length=255), nullable=True),
++        sa.Column("ua_family", sa.String(length=32), nullable=False),
++    )
++    op.create_index("ix_clicks_link_day", "clicks", ["link_id", "day"])
++    op.create_index("ix_clicks_occurred_at", "clicks", ["occurred_at"])
++
++
++def downgrade() -> None:
++    op.drop_index("ix_clicks_occurred_at", table_name="clicks")
++    op.drop_index("ix_clicks_link_day", table_name="clicks")
++    op.drop_table("clicks")
++    with op.batch_alter_table("links") as batch:
++        batch.drop_column("expires_at")
+
+--- /dev/null
++++ b/tests/service/test_schema_v2.py
+@@ -0,0 +1,34 @@
++# lineage: REQ-BF-002 / implement.migration_0002 (see runs/ for the decision trail)
++"""Migration 0002 adds links.expires_at and clicks, and reverses cleanly."""
++
++from pathlib import Path
++
++from alembic import command
++from alembic.config import Config
++from sqlalchemy import create_engine, inspect
++
++from service.db import ALEMBIC_INI
++
++
++def test_migration_0002_upgrade_and_downgrade(tmp_path: Path) -> None:
++    db = tmp_path / "v2.db"
++    cfg = Config(str(ALEMBIC_INI))
++    cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db}")
++    command.upgrade(cfg, "0002")
++    engine = create_engine(f"sqlite:///{db}")
++    insp = inspect(engine)
++    assert "expires_at" in {c["name"] for c in insp.get_columns("links")}
++    assert {c["name"] for c in insp.get_columns("clicks")} >= {
++        "link_id",
++        "occurred_at",
++        "day",
++        "visitor_hash",
++        "referrer_host",
++        "ua_family",
++    }
++    assert "ip" not in {c["name"] for c in insp.get_columns("clicks")}
++    command.downgrade(cfg, "0001")
++    insp = inspect(engine)
++    assert "clicks" not in insp.get_table_names()
++    assert "expires_at" not in {c["name"] for c in insp.get_columns("links")}
++    engine.dispose()
+
+--- a/service/models.py
++++ b/service/models.py
+@@ -1,9 +1,9 @@
+-# lineage: REQ-GF-001 / implement.foundation (see runs/ for the decision trail)
++# lineage: REQ-GF-001 / implement.foundation, REQ-BF-002 / implement.migration_0002
+ """Persistence model."""
+ 
+-from datetime import datetime
++from datetime import date, datetime
+ 
+-from sqlalchemy import JSON, Boolean, Integer, String, Text
++from sqlalchemy import JSON, Boolean, Date, ForeignKey, Index, Integer, String, Text
+ from sqlalchemy.orm import Mapped, mapped_column
+ 
+ from service.db import Base, UTCDateTime, utcnow
+@@ -23,3 +23,19 @@
+     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+     request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
++    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
++
++
++class Click(Base):
++    """One redirect. Stores no raw IP or user agent: only a daily-salted visitor hash."""
++
++    __tablename__ = "clicks"
++    __table_args__ = (Index("ix_clicks_link_day", "link_id", "day"),)
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
++    link_id: Mapped[int] = mapped_column(ForeignKey("links.id", ondelete="CASCADE"))
++    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
++    day: Mapped[date] = mapped_column(Date)
++    visitor_hash: Mapped[str] = mapped_column(String(64))
++    referrer_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
++    ua_family: Mapped[str] = mapped_column(String(32))

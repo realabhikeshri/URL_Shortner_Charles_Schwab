@@ -1,0 +1,12 @@
+--- a/service/repository.py
++++ b/service/repository.py
+@@ -12,7 +12,8 @@
+         self.session = session
+ 
+     async def get_by_code(self, code: str) -> Link | None:
+-        result = await self.session.execute(select(Link).where(Link.code == code))
++        # Aliases are stored lower-cased, so normalise the lookup the same way.
++        result = await self.session.execute(select(Link).where(Link.code == code.lower()))
+         return result.scalar_one_or_none()
+ 
+     async def code_exists(self, code: str) -> bool:

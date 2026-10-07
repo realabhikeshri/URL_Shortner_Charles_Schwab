@@ -1,0 +1,54 @@
+flowchart TD
+    intake["intake<br/><small>intake · RequirementAnalyst · risk low</small>"]
+    analysis_impact["analysis.impact<br/><small>analysis · CodebaseAnalyst · risk low</small>"]
+    plan["plan<br/><small>plan · Planner · risk low</small>"]
+    design_analytics["design.analytics<br/><small>design · Architect · risk low</small>"]
+    implement_migration_0002["implement.migration_0002<br/><small>implement · Implementer · risk medium</small>"]
+    test_regression_alias["test.regression_alias<br/><small>test · TestEngineer · risk low</small>"]
+    implement_alias_fix["implement.alias_fix<br/><small>implement · Implementer · risk medium</small>"]
+    implement_expiry["implement.expiry<br/><small>implement · Implementer · risk medium</small>"]
+    implement_analytics["implement.analytics<br/><small>implement · Implementer · risk medium</small>"]
+    test_analytics["test.analytics<br/><small>test · TestEngineer · risk low</small>"]
+    document_analytics["document.analytics<br/><small>document · DocWriter · risk low</small>"]
+    test_coverage["test.coverage<br/><small>test · TestEngineer · risk low</small>"]
+    review_code["review.code<br/><small>review · Reviewer · risk low</small>"]
+    release_readiness["release.readiness<br/><small>release_check · ReleaseManager · risk medium</small>"]
+    intake --> analysis_impact
+    analysis_impact --> plan
+    plan --> design_analytics
+    design_analytics --> implement_migration_0002
+    design_analytics --> test_regression_alias
+    test_regression_alias --> implement_alias_fix
+    implement_migration_0002 --> implement_expiry
+    implement_expiry --> implement_analytics
+    implement_migration_0002 --> implement_analytics
+    implement_analytics --> test_analytics
+    implement_alias_fix --> document_analytics
+    implement_analytics --> document_analytics
+    implement_alias_fix --> test_coverage
+    implement_analytics --> test_coverage
+    test_analytics --> test_coverage
+    test_regression_alias --> test_coverage
+    document_analytics --> review_code
+    test_coverage --> review_code
+    review_code --> release_readiness
+    classDef ok fill:#d1fadf,stroke:#12b76a;
+    classDef bad fill:#fee4e2,stroke:#d92d20;
+    classDef warn fill:#fef0c7,stroke:#dc6803;
+    classDef gate fill:#e0eaff,stroke:#444ce7;
+    classDef run fill:#f2f4f7,stroke:#344054;
+    classDef skip fill:#f9fafb,stroke:#98a2b3,stroke-dasharray: 4 2;
+    class intake ok;
+    class analysis_impact ok;
+    class plan ok;
+    class design_analytics ok;
+    class implement_migration_0002 ok;
+    class test_regression_alias ok;
+    class implement_alias_fix ok;
+    class implement_expiry ok;
+    class implement_analytics ok;
+    class test_analytics ok;
+    class document_analytics ok;
+    class test_coverage ok;
+    class review_code ok;
+    class release_readiness ok;

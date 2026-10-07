@@ -1,0 +1,48 @@
+id: REQ-BF-002
+title: Click analytics, link expiry and alias case bug fix
+kind: brownfield
+goal: >-
+  Add click analytics (stats endpoint with daily breakdown, referrers, unique visitors) and link expiry,
+  and fix the bug where custom aliases are case-sensitive in lookups but not in creation.
+functional:
+  - GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families.
+  - Clicks are recorded off the redirect hot path; analytics failures never fail a redirect.
+  - Links accept an optional expires_at on create and PATCH; expired links return 410 on redirect.
+  - Bug fix - a custom alias created as 'MyLink' must be reachable at /MyLink and /mylink (aliases are case-insensitive); generated codes stay case-sensitive.
+non_functional:
+  - Unique visitors are counted from a daily-salted hash of IP and user agent; no raw IP or user agent is stored.
+  - Analytics data has a configurable retention period.
+  - Schema changes ship as a reversible Alembic migration.
+acceptance_criteria:
+  - id: AC-1
+    given: a custom alias created as 'MyLink'
+    when: a client requests /MyLink or /mylink
+    then: both redirect to the target
+    verified_by: [tests/service/test_regression_alias_case.py::test_alias_lookup_is_case_insensitive]
+  - id: AC-2
+    given: a generated code with mixed case
+    when: a client requests it with different casing
+    then: only the exact code resolves
+    verified_by: [tests/service/test_integration.py::test_generated_codes_are_case_sensitive]
+  - id: AC-3
+    given: a link with expires_at in the past
+    when: a client follows it
+    then: the service returns 410 and metadata reports is_expired
+    verified_by: [tests/service/test_expiry.py::test_expired_link_returns_410]
+  - id: AC-4
+    given: several redirects from different visitors and referrers
+    when: a client requests the stats endpoint
+    then: totals, unique visitors, daily breakdown, referrers and user-agent families are correct
+    verified_by: [tests/service/test_stats_api.py::test_stats_reflect_recorded_clicks]
+  - id: AC-5
+    given: the analytics store is failing
+    when: a client follows a link
+    then: the redirect still succeeds
+    verified_by: [tests/service/test_stats_api.py::test_analytics_failure_never_breaks_redirect]
+  - id: AC-6
+    given: recorded clicks
+    when: the database is inspected
+    then: no raw IP address or user agent is stored
+    verified_by: [tests/service/test_analytics_unit.py::test_no_raw_pii_is_persisted]
+constraints:
+  - Must not change existing endpoint contracts other than adding optional fields.

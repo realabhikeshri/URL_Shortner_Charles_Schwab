@@ -98,3 +98,12 @@ deterministic provider's "prompt"), so lineage stays honest — the committed se
 orchestrator output. They are listed in ADR-014: entropy false positive on the base62 alphabet, Alembic imports,
 the streaming body-limit path (raise inside the app so the handler renders 413), and the seeded alias-case bug
 (kept deliberately for the brownfield scenario).
+
+## Phase 6 — Brownfield run (committed evidence)
+
+`make scenario-brownfield APPROVE=--auto-approve=low` so the medium-risk gates require a human:
+the migration gate blocked; its diff was reviewed (additive DDL only, reversible) and approved with
+`orchestrator approve brownfield-20261007T000441 implement.migration_0002#1`, then `resume`; release sign-off likewise.
+The alias branch ran in parallel: the regression test failed first (red), the naive fix failed the targeted
+suite (`test_generated_codes_are_case_sensitive`), was rolled back, and the retry self-repaired from that
+feedback. Evidence: `runs/brownfield-20261007T000441/` (impact.json, diffs/, report).
