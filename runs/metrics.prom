@@ -1,0 +1,85 @@
+# HELP orchestrator_node_success_rate Succeeded nodes / finished nodes
+# TYPE orchestrator_node_success_rate gauge
+orchestrator_node_success_rate{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 1.0
+orchestrator_node_success_rate{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 1.0
+orchestrator_node_success_rate{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 1.0
+# HELP orchestrator_retry_rate Retries / attempts
+# TYPE orchestrator_retry_rate gauge
+orchestrator_retry_rate{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_retry_rate{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 0.0667
+orchestrator_retry_rate{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_rollback_frequency Rollbacks / write-node attempts
+# TYPE orchestrator_rollback_frequency gauge
+orchestrator_rollback_frequency{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_rollback_frequency{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 0.1111
+orchestrator_rollback_frequency{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_fallback_frequency Fallback LLM calls / all LLM calls
+# TYPE orchestrator_fallback_frequency gauge
+orchestrator_fallback_frequency{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_fallback_frequency{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 0.0
+orchestrator_fallback_frequency{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_mttr_s Mean time to recover a failed node (seconds)
+# TYPE orchestrator_mttr_s gauge
+orchestrator_mttr_s{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 1.08
+# HELP orchestrator_end_to_end_latency_s Run wall time (seconds)
+# TYPE orchestrator_end_to_end_latency_s gauge
+orchestrator_end_to_end_latency_s{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 17.575
+orchestrator_end_to_end_latency_s{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 29.781
+orchestrator_end_to_end_latency_s{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 11.583
+# HELP orchestrator_approval_wait_mean_s Mean approval wait (seconds)
+# TYPE orchestrator_approval_wait_mean_s gauge
+orchestrator_approval_wait_mean_s{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.107
+orchestrator_approval_wait_mean_s{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 8.414
+orchestrator_approval_wait_mean_s{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_retries Retries in the run
+# TYPE orchestrator_retries gauge
+orchestrator_retries{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_retries{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 1.0
+orchestrator_retries{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_rollbacks Rollbacks in the run
+# TYPE orchestrator_rollbacks gauge
+orchestrator_rollbacks{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_rollbacks{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 1.0
+orchestrator_rollbacks{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_llm_cost_usd LLM spend (USD)
+# TYPE orchestrator_llm_cost_usd gauge
+orchestrator_llm_cost_usd{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 0.0
+orchestrator_llm_cost_usd{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 0.0
+orchestrator_llm_cost_usd{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_replans Dynamic re-plans
+# TYPE orchestrator_replans gauge
+orchestrator_replans{run_id="ambiguous-20261007T000933",scenario="ambiguous",state="SUCCEEDED"} 1.0
+orchestrator_replans{run_id="brownfield-20261007T000441",scenario="brownfield",state="SUCCEEDED"} 0.0
+orchestrator_replans{run_id="greenfield-20261007T000413",scenario="greenfield",state="SUCCEEDED"} 0.0
+# HELP orchestrator_stage_latency_s Wall time per node type (seconds)
+# TYPE orchestrator_stage_latency_s gauge
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="analysis"} 0.327
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="design"} 0.09
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="document"} 0.487
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="implement"} 8.705
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="intake"} 0.026
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="plan"} 0.013
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="release_check"} 3.53
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="review"} 0.715
+orchestrator_stage_latency_s{run_id="ambiguous-20261007T000933",stage="test"} 9.641
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="analysis"} 0.321
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="design"} 0.069
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="document"} 0.424
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="implement"} 16.333
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="intake"} 0.025
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="plan"} 0.013
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="release_check"} 8.908
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="review"} 0.617
+orchestrator_stage_latency_s{run_id="brownfield-20261007T000441",stage="test"} 6.353
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="analysis"} 0.006
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="design"} 0.07
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="document"} 0.459
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="implement"} 4.221
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="intake"} 0.025
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="plan"} 0.013
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="release_check"} 2.656
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="review"} 0.678
+orchestrator_stage_latency_s{run_id="greenfield-20261007T000413",stage="test"} 5.42
+# HELP orchestrator_run_success_rate Succeeded runs / finished runs
+# TYPE orchestrator_run_success_rate gauge
+orchestrator_run_success_rate 1.0

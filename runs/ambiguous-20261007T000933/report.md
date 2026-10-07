@@ -1,4 +1,4 @@
-# Run report: `ambiguous-20261007T000543`
+# Run report: `ambiguous-20261007T000933`
 
 - **Scenario:** ambiguous  
 - **State:** SUCCEEDED  
@@ -6,11 +6,11 @@
 - **Provider:** deterministic  
 - **Plan version:** 2  
 - **Audit chain:** intact (190 events)  
-- **End-to-end latency:** 29.369s
+- **End-to-end latency:** 17.575s
 
 ## Requirement
 
-**REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster. Update from security review: ent** (v2, ambiguity 1.0, risk high)
+**REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster** (v2, ambiguity 0.5, risk high)
 
 > Make the shortener enterprise-ready and faster. Update from security review: enterprise-ready requires API-key authentication on all write endpoints (create, update, delete). Keys must be stored hashed and only the owning key may modify or delete a link.
 
@@ -20,14 +20,12 @@ Capabilities: enterprise_wiring, caching, rate_limiting, observability, performa
 |---|---|---|
 | enterprise-ready | Which enterprise capabilities are in scope (authentication, rate limiting, caching, observability, SSO, multi-tenancy)? | Interpret as read-through caching of redirects, per-client rate limiting and Prometheus metrics. Authentication changes the public API contract, so it is NOT assumed; it is raised as open question Q-1. |
 | faster | Faster for which endpoint, by how much, and under what load? | Target the redirect hot path - p95 latency under 50 ms with 20 concurrent clients on a developer laptop (SQLite), measured by scripts/loadcheck.py and enforced as a gate. |
-| secure | Which threats and controls are in scope (authn, authz, abuse prevention, audit)? | API-key authentication on writes plus rate limiting. |
 
 Open questions: Q-2: Is there a production SLO (p95/p99, RPS) that should replace the laptop target?
 
 Assumptions:
 - [enterprise-ready] Interpret as read-through caching of redirects, per-client rate limiting and Prometheus metrics. Authentication changes the public API contract, so it is NOT assumed; it is raised as open question Q-1.
 - [faster] Target the redirect hot path - p95 latency under 50 ms with 20 concurrent clients on a developer laptop (SQLite), measured by scripts/loadcheck.py and enforced as a gate.
-- [secure] API-key authentication on writes plus rate limiting.
 - Resolved Q-1 by requirement text: api_key_auth is in scope.
 
 | AC | Given / When / Then | Verified by |
@@ -117,23 +115,23 @@ flowchart TD
 
 | Node | Type | Agent | Risk | State | Attempts | Started | Duration |
 |---|---|---|---|---|---|---|---|
-| `intake` | intake | RequirementAnalyst | low | SUCCEEDED | 1 | 00:05:43 | 0.0s |
-| `analysis.impact` | analysis | CodebaseAnalyst | low | SUCCEEDED | 1 | 00:05:43 | 0.3s |
-| `plan` | plan | Planner | low | SUCCEEDED | 1 | 00:05:43 | 0.0s |
-| `design.enterprise` | design | Architect | low | SUCCEEDED | 1 | 00:05:49 | 0.1s |
-| `implement.enterprise_wiring` | implement | Implementer | medium | SUCCEEDED | 1 | 00:05:51 | 1.4s |
-| `implement.cache_backend` | implement | Implementer | low | SUCCEEDED | 1 | 00:05:49 | 1.2s |
-| `implement.rate_limiter` | implement | Implementer | low | SUCCEEDED | 1 | 00:05:49 | 1.2s |
-| `implement.metrics` | implement | Implementer | low | SUCCEEDED | 1 | 00:05:49 | 0.9s |
-| `implement.loadcheck` | implement | Implementer | low | SUCCEEDED | 1 | 00:05:49 | 0.3s |
-| `test.performance` | test | TestEngineer | low | SUCCEEDED | 1 | 00:06:00 | 1.9s |
-| `document.enterprise` | document | DocWriter | low | SUCCEEDED | 1 | 00:06:00 | 0.5s |
-| `test.coverage` | test | TestEngineer | low | SUCCEEDED | 1 | 00:06:01 | 6.9s |
-| `review.code` | review | Reviewer | low | SUCCEEDED | 1 | 00:06:08 | 0.7s |
-| `release.readiness` | release_check | ReleaseManager | high | SUCCEEDED | 1 | 00:06:09 | 3.4s |
-| `implement.auth_migration` | implement | Implementer | medium | SUCCEEDED | 1 | 00:05:50 | 1.7s |
-| `implement.api_key_auth` | implement | Implementer | high | SUCCEEDED | 1 | 00:05:52 | 8.4s |
-| `test.auth_security` | test | TestEngineer | low | SUCCEEDED | 1 | 00:06:00 | 0.9s |
+| `intake` | intake | RequirementAnalyst | low | SUCCEEDED | 1 | 00:09:33 | 0.0s |
+| `analysis.impact` | analysis | CodebaseAnalyst | low | SUCCEEDED | 1 | 00:09:33 | 0.3s |
+| `plan` | plan | Planner | low | SUCCEEDED | 1 | 00:09:33 | 0.0s |
+| `design.enterprise` | design | Architect | low | SUCCEEDED | 1 | 00:09:34 | 0.1s |
+| `implement.enterprise_wiring` | implement | Implementer | medium | SUCCEEDED | 1 | 00:09:35 | 1.4s |
+| `implement.cache_backend` | implement | Implementer | low | SUCCEEDED | 1 | 00:09:34 | 1.3s |
+| `implement.rate_limiter` | implement | Implementer | low | SUCCEEDED | 1 | 00:09:34 | 1.2s |
+| `implement.metrics` | implement | Implementer | low | SUCCEEDED | 1 | 00:09:34 | 0.9s |
+| `implement.loadcheck` | implement | Implementer | low | SUCCEEDED | 1 | 00:09:34 | 0.3s |
+| `test.performance` | test | TestEngineer | low | SUCCEEDED | 1 | 00:09:38 | 1.9s |
+| `document.enterprise` | document | DocWriter | low | SUCCEEDED | 1 | 00:09:38 | 0.5s |
+| `test.coverage` | test | TestEngineer | low | SUCCEEDED | 1 | 00:09:39 | 6.8s |
+| `review.code` | review | Reviewer | low | SUCCEEDED | 1 | 00:09:46 | 0.7s |
+| `release.readiness` | release_check | ReleaseManager | high | SUCCEEDED | 1 | 00:09:47 | 3.5s |
+| `implement.auth_migration` | implement | Implementer | medium | SUCCEEDED | 1 | 00:09:34 | 1.7s |
+| `implement.api_key_auth` | implement | Implementer | high | SUCCEEDED | 1 | 00:09:37 | 1.8s |
+| `test.auth_security` | test | TestEngineer | low | SUCCEEDED | 1 | 00:09:38 | 0.9s |
 
 ## Gates
 
@@ -160,18 +158,18 @@ flowchart TD
 | `implement.auth_migration` | 1 | exit | migrations_apply | PASS | upgrade/downgrade/upgrade round-trip succeeded |
 | `implement.enterprise_wiring` | 1 | exit | compiles | PASS | 9 files compile |
 | `implement.enterprise_wiring` | 1 | exit | lint_clean | PASS | ruff clean on 9 files |
-| `implement.auth_migration` | 1 | exit | targeted_tests | PASS | 1 passed in 0.08s [tests/service/test_schema_v3.py] |
-| `implement.enterprise_wiring` | 1 | exit | targeted_tests | PASS | 25 passed in 0.36s [tests/service/test_enterprise.py, tests/service/test_api_links.py, tests/service/test_stats_api.py] |
+| `implement.auth_migration` | 1 | exit | targeted_tests | PASS | 1 passed in 0.09s [tests/service/test_schema_v3.py] |
+| `implement.enterprise_wiring` | 1 | exit | targeted_tests | PASS | 25 passed in 0.37s [tests/service/test_enterprise.py, tests/service/test_api_links.py, tests/service/test_stats_api.py] |
 | `implement.api_key_auth` | 1 | exit | compiles | PASS | 11 files compile |
 | `implement.api_key_auth` | 1 | exit | lint_clean | PASS | ruff clean on 11 files |
-| `implement.api_key_auth` | 1 | exit | targeted_tests | PASS | 33 passed in 0.65s [tests/service/test_auth.py, tests/service/test_api_links.py, tests/service/test_integration.py, tests/service/test_enterprise.py] |
+| `implement.api_key_auth` | 1 | exit | targeted_tests | PASS | 33 passed in 0.67s [tests/service/test_auth.py, tests/service/test_api_links.py, tests/service/test_integration.py, tests/service/test_enterprise.py] |
 | `test.auth_security` | 1 | exit | compiles | PASS | 1 files compile |
 | `test.auth_security` | 1 | exit | lint_clean | PASS | ruff clean on 1 files |
 | `document.enterprise` | 1 | exit | has_output | PASS |  |
 | `document.enterprise` | 1 | exit | changelog_entry | PASS | CHANGELOG has Unreleased entries |
 | `test.auth_security` | 1 | exit | targeted_tests | PASS | 13 passed in 0.21s [tests/service/test_auth_security.py] |
-| `test.performance` | 1 | exit | p95_under_target | PASS | p95 6.4ms <= target 50.0ms (p50 5.3ms) |
-| `test.coverage` | 1 | exit | coverage:85 | PASS | coverage 97.0% >= 85% (154 passed in 5.07s) |
+| `test.performance` | 1 | exit | p95_under_target | PASS | p95 6.1ms <= target 50.0ms (p50 5.2ms) |
+| `test.coverage` | 1 | exit | coverage:85 | PASS | coverage 97.0% >= 85% (154 passed in 5.03s) |
 | `review.code` | 1 | exit | review_approved | PASS | reviewer approved (5 non-blocking findings) |
 | `release.readiness` | 1 | exit | typecheck | PASS | Success: no issues found in 32 source files |
 | `release.readiness` | 1 | exit | changelog_entry | PASS | CHANGELOG has Unreleased entries |
@@ -190,7 +188,7 @@ flowchart TD
 | `implement.auth_migration#1` | medium | approved | auto-approver (build-agent (Claude Code, acting for repo owner)) | True | auto-approved by --auto-approve=low,medium | db_migration: database schema migration [service/migrations/versions/rev_0003_api_keys.py] |
 | `implement.enterprise_wiring#1` | medium | approved | auto-approver (build-agent (Claude Code, acting for repo owner)) | True | auto-approved by --auto-approve=low,medium | dependency_addition: new or changed runtime dependency [pyproject.toml] |
 | `implement.api_key_auth#1` | high | approved | build-agent (Claude Code, acting for repo owner) | False | Reviewed auth diff: SHA-256 at rest, constant-time compare, dummy hash for unkn… | security_sensitive: authentication / authorization / key handling change [service/auth.py]; node_risk: planner classified implement.api_key_auth as high risk |
-| `release.readiness#1` | high | approved | build-agent (Claude Code, acting for repo owner) | False | Release sign-off: all checklist items green; p95 within target; high-risk chang… | release_signoff: release sign-off (risk = max(medium, run risk)) [release_check node] |
+| `release.readiness#1` | high | approved | build-agent (Claude Code, acting for repo owner) | False | Release sign-off: checklist green; p95 within target; high-risk changes individ… | release_signoff: release sign-off (risk = max(medium, run risk)) [release_check node] |
 
 ## Dynamic re-planning
 
@@ -207,26 +205,26 @@ flowchart TD
 
 | Decision | Node | Agent | Parents | Rationale |
 |---|---|---|---|---|
-| D-ba6efeb323 | `requirement` | human |  | Requirement of record: ambiguous.txt |
-| D-a1cd3031fb | `intake` | RequirementAnalyst | D-ba6efeb323 | Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance']. Ambiguities: ['enterprise-ready', 'faster']. Assumptions: 2. |
-| D-23e8a2db83 | `analysis.impact` | CodebaseAnalyst | D-a1cd3031fb | Seeds ['service', 'service.api', 'service.api.health'] -> 5 impacted modules via the reverse import graph; routes from fastapi; migrations_needed=False; blast radius 0.182. |
-| D-a0d8460b23 | `plan` | Planner | D-23e8a2db83 | Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance'] decomposed from the catalog. Independent work runs in parallel (implement.cache_backend, implement.loadc… |
-| D-51fbd31c0e | `design.enterprise` | Architect | D-a0d8460b23 | Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate f… |
-| D-c2b20b29bb | `replan-1` | Planner | D-a0d8460b23 | Requirement v2 adds capabilities ['api_key_auth', 'auth_schema'] (risk medium -> high); design must be revisited and 3 node(s) added, 4 re-wired. |
-| D-f12531c40e | `design.enterprise` | Architect | D-a0d8460b23 | Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate f… |
-| D-bc05dae184 | `implement.cache_backend` | Implementer | D-f12531c40e | One protocol, two backends: the in-memory LRU keeps the single-process default dependency-free, Redis shares state across replicas. Values are small JSON strings; TTLs are enforced per entry. |
-| D-4280e6b89b | `implement.rate_limiter` | Implementer | D-f12531c40e | Token buckets allow short bursts while bounding sustained rate. The Redis variant runs the read-modify-write in a Lua script so concurrent replicas cannot double-spend tokens. |
-| D-255ca01363 | `implement.metrics` | Implementer | D-f12531c40e | Labels use the route template (/{code}), never the raw path, so cardinality stays bounded. A per-app CollectorRegistry avoids global state and duplicate-registration errors in tests. |
-| D-f74e53977d | `implement.loadcheck` | Implementer | D-f12531c40e | Turns "faster" into a measurable, repeatable number. Links are seeded through the service layer, the server runs as a separate process, and each concurrent worker owns its own HTTP connection so the … |
-| D-d4cc46960c | `implement.auth_migration` | Implementer | D-f12531c40e | Additive and reversible. Existing links keep owner_key_id NULL (no owner) so they remain manageable after auth is enabled; new links record the creating key. |
-| D-7751e76b93 | `implement.enterprise_wiring` | Implementer | D-bc05dae184, D-4280e6b89b, D-255ca01363 | Redirects resolve through a read-through cache keyed by canonical code (aliases look up their lower-case entry; only canonical misses are negatively cached), invalidated on create/update/delete. Cach… |
-| D-1ee241cf41 | `implement.api_key_auth` | Implementer | D-7751e76b93, D-d4cc46960c | Opaque 256-bit keys with an indexed prefix, compared in constant time, revocable, never logged. Writes are rate limited per key. Only the creating key may PATCH/DELETE a link (403 otherwise). Redirec… |
-| D-2a5d906ff8 | `test.auth_security` | TestEngineer | D-1ee241cf41 | Attack-oriented tests for the new trust boundary, independent of the implementer's own tests. |
-| D-72c3cce764 | `document.enterprise` | DocWriter | D-1ee241cf41, D-f74e53977d | API reference and OpenAPI are generated from the running app, so they cannot drift from the code. |
-| D-96ae3d6549 | `test.coverage` | TestEngineer | D-1ee241cf41, D-f74e53977d, D-2a5d906ff8 | Coverage is measured by the independent coverage gate, not self-reported. |
-| D-6e2d7a0e4f | `test.performance` | TestEngineer | D-7751e76b93, D-f74e53977d, D-1ee241cf41 | Measured against a real uvicorn process over HTTP (not in-process). |
-| D-5d394b669d | `review.code` | Reviewer | D-72c3cce764, D-96ae3d6549, D-6e2d7a0e4f | 8/8 acceptance criteria verified by passing tests; 33 files changed. |
-| D-51d5e9c0ed | `release.readiness` | ReleaseManager | D-5d394b669d | REQ-AMBIGUOUS: Make the shortener enterprise-ready and faster. Update from security review: enterprise-ready requires API-key authentication on all write endpoints (create, update, delete). Keys must… |
+| D-03924c8505 | `requirement` | human |  | Requirement of record: ambiguous.txt |
+| D-962ab3b432 | `intake` | RequirementAnalyst | D-03924c8505 | Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance']. Ambiguities: ['enterprise-ready', 'faster']. Assumptions: 2. |
+| D-9d75a4ef74 | `analysis.impact` | CodebaseAnalyst | D-962ab3b432 | Seeds ['service', 'service.api', 'service.api.health'] -> 5 impacted modules via the reverse import graph; routes from fastapi; migrations_needed=False; blast radius 0.182. |
+| D-8a56777a46 | `plan` | Planner | D-9d75a4ef74 | Capabilities ['enterprise_wiring', 'caching', 'rate_limiting', 'observability', 'performance'] decomposed from the catalog. Independent work runs in parallel (implement.cache_backend, implement.loadc… |
+| D-07203b6acb | `design.enterprise` | Architect | D-8a56777a46 | Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate f… |
+| D-732b45f4f2 | `replan-1` | Planner | D-8a56777a46 | Requirement v2 adds capabilities ['api_key_auth', 'auth_schema'] (risk medium -> high); design must be revisited and 3 node(s) added, 4 re-wired. |
+| D-27fc314d8b | `design.enterprise` | Architect | D-8a56777a46 | Read-through cache of the resolved link (positive + short negative TTL): removes the DB from the hot path; negative caching blunts enumeration; Invalidate on PATCH/DELETE: correctness over hit rate f… |
+| D-8f6d89f24f | `implement.cache_backend` | Implementer | D-27fc314d8b | One protocol, two backends: the in-memory LRU keeps the single-process default dependency-free, Redis shares state across replicas. Values are small JSON strings; TTLs are enforced per entry. |
+| D-657a03a5ee | `implement.rate_limiter` | Implementer | D-27fc314d8b | Token buckets allow short bursts while bounding sustained rate. The Redis variant runs the read-modify-write in a Lua script so concurrent replicas cannot double-spend tokens. |
+| D-1930c22c69 | `implement.metrics` | Implementer | D-27fc314d8b | Labels use the route template (/{code}), never the raw path, so cardinality stays bounded. A per-app CollectorRegistry avoids global state and duplicate-registration errors in tests. |
+| D-7949d034e4 | `implement.loadcheck` | Implementer | D-27fc314d8b | Turns "faster" into a measurable, repeatable number. Links are seeded through the service layer, the server runs as a separate process, and each concurrent worker owns its own HTTP connection so the … |
+| D-8268deda37 | `implement.auth_migration` | Implementer | D-27fc314d8b | Additive and reversible. Existing links keep owner_key_id NULL (no owner) so they remain manageable after auth is enabled; new links record the creating key. |
+| D-4e29e8c688 | `implement.enterprise_wiring` | Implementer | D-8f6d89f24f, D-657a03a5ee, D-1930c22c69 | Redirects resolve through a read-through cache keyed by canonical code (aliases look up their lower-case entry; only canonical misses are negatively cached), invalidated on create/update/delete. Cach… |
+| D-3cb800799a | `implement.api_key_auth` | Implementer | D-4e29e8c688, D-8268deda37 | Opaque 256-bit keys with an indexed prefix, compared in constant time, revocable, never logged. Writes are rate limited per key. Only the creating key may PATCH/DELETE a link (403 otherwise). Redirec… |
+| D-e94d4e87de | `test.auth_security` | TestEngineer | D-3cb800799a | Attack-oriented tests for the new trust boundary, independent of the implementer's own tests. |
+| D-cc796351e7 | `document.enterprise` | DocWriter | D-3cb800799a, D-7949d034e4 | API reference and OpenAPI are generated from the running app, so they cannot drift from the code. |
+| D-3d3cd26e92 | `test.coverage` | TestEngineer | D-3cb800799a, D-7949d034e4, D-e94d4e87de | Coverage is measured by the independent coverage gate, not self-reported. |
+| D-bc05b16c72 | `test.performance` | TestEngineer | D-4e29e8c688, D-7949d034e4, D-3cb800799a | Measured against a real uvicorn process over HTTP (not in-process). |
+| D-fb10f7b16f | `review.code` | Reviewer | D-cc796351e7, D-3d3cd26e92, D-bc05b16c72 | 8/8 acceptance criteria verified by passing tests; 33 files changed. |
+| D-6c98148876 | `release.readiness` | ReleaseManager | D-fb10f7b16f | REQ-AMBIGUOUS: Make the shortener enterprise-ready and faster. Update from security review: enterprise-ready requires API-key authentication on all write endpoints (create, update, delete). Keys must… |
 
 ## Metrics
 
@@ -241,18 +239,18 @@ flowchart TD
 | fallbacks | 0 |
 | fallback_frequency | 0.0 |
 | mttr_s | None |
-| end_to_end_latency_s | 29.369 |
+| end_to_end_latency_s | 17.575 |
 | approvals | 6 |
 | approvals_auto | 3 |
-| approval_wait_mean_s | 2.102 |
+| approval_wait_mean_s | 0.107 |
 | gates_evaluated | 55 |
 | gates_failed | 0 |
 | replans | 1 |
 | llm_calls | 18 |
-| llm_input_tokens | 32206 |
-| llm_output_tokens | 32899 |
+| llm_input_tokens | 31756 |
+| llm_output_tokens | 32774 |
 | llm_cost_usd | 0.0 |
-| stage_latency_s | {'analysis': 0.324, 'design': 0.083, 'document': 0.486, 'implement': 15.048, 'intake': 0.025, 'plan': 0.013, 'release_check': 3.369, 'review': 0.718, 'test': 9.664} |
+| stage_latency_s | {'analysis': 0.327, 'design': 0.09, 'document': 0.487, 'implement': 8.705, 'intake': 0.026, 'plan': 0.013, 'release_check': 3.53, 'review': 0.715, 'test': 9.641} |
 
 ## Artifacts
 

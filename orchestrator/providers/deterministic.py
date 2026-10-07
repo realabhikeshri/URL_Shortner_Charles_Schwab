@@ -133,15 +133,18 @@ class DeterministicProvider(LLMProvider):
                 capabilities.update(term.get("implies", []))
                 if term.get("open_question"):
                     open_questions.append(term["open_question"])
+        resolved = 0
         for question, capability in (kb.get("answers") or {}).items():
             if question in open_questions and capability in capabilities:
                 open_questions.remove(question)
+                resolved += 1
                 assumptions.append(
                     f"Resolved {question.split(':')[0]} by requirement text: "
                     f"{capability} is in scope."
                 )
 
         score = sum(weights[a.impact.value] for a in ambiguities)
+        score = max(score - resolved * float(kb.get("resolved_question_credit", 0.0)), 0.0)
         if structured and data.get("acceptance_criteria"):
             score = max(score - 0.15, 0.0)
         caps = self._close_capabilities(capabilities, catalog)
@@ -180,7 +183,7 @@ class DeterministicProvider(LLMProvider):
             previous_id = previous.get("id") if isinstance(previous, dict) else None
             spec = RequirementSpec(
                 id=previous_id or f"REQ-{Path(filename).stem.upper()}",
-                title=goal.rstrip(".")[:80],
+                title=(previous or {}).get("title") or goal.split(".")[0][:80],
                 goal=goal,
                 kind="enhancement",
                 functional=[catalog["capabilities"][c]["title"] for c in visible],

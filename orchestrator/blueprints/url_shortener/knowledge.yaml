@@ -30,7 +30,7 @@ vague_terms:
     default_assumption: Horizontal scaling behind a load balancer with shared Redis and Postgres.
     implies: [caching]
   - term: secure
-    pattern: '\bsecure\b|\bsecurity\b'
+    pattern: '\b(more|make it|be)\s+secure\b'   # a request to "be secure", not "security review"
     impact: high
     question: Which threats and controls are in scope (authn, authz, abuse prevention, audit)?
     default_assumption: API-key authentication on writes plus rate limiting.
@@ -48,5 +48,6 @@ capability_keywords:
   api_key_auth: ['api[- ]key auth', 'api-key authentication', 'x-api-key', 'authentication on all write']
 
 # Resolves open questions when later requirement text answers them.
+resolved_question_credit: 0.15   # each answered open question lowers the ambiguity score
 answers:
   "Q-1: Is API-key authentication required on write endpoints?": api_key_auth

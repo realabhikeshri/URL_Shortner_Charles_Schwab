@@ -1,8 +1,7 @@
 --- a/docs/design/enterprise.md
 +++ b/docs/design/enterprise.md
 @@ -1,10 +1,10 @@
--# Design - Make the shortener enterprise-ready and faster
-+# Design - Make the shortener enterprise-ready and faster. Update from security review: ent
+ # Design - Make the shortener enterprise-ready and faster
  
 -Requirement: **REQ-AMBIGUOUS** (v1, risk medium)
 +Requirement: **REQ-AMBIGUOUS** (v2, risk high)
@@ -23,7 +22,7 @@
  
  ## Decisions
  
-@@ -23,16 +25,20 @@
+@@ -23,11 +25,14 @@
  | 429 with Retry-After and X-RateLimit-* headers | standard, client-friendly back-off signal |
  | Per-app CollectorRegistry | isolated in tests, no global state |
  | p95 < 50 ms @ 20 concurrent clients (laptop, SQLite) enforced as a gate | a concrete, repeatable number replaces 'faster' |
@@ -38,13 +37,7 @@
  
  ## Risks and assumptions
  
- - [enterprise-ready] Interpret as read-through caching of redirects, per-client rate limiting and Prometheus metrics. Authentication changes the public API contract, so it is NOT assumed; it is raised as open question Q-1.
- - [faster] Target the redirect hot path - p95 latency under 50 ms with 20 concurrent clients on a developer laptop (SQLite), measured by scripts/loadcheck.py and enforced as a gate.
-+- [secure] API-key authentication on writes plus rate limiting.
- 
- ## Acceptance criteria
- 
-@@ -41,8 +47,10 @@
+@@ -41,8 +46,10 @@
  - **AC-R1** Given a client over its rate limit, when it sends another request, then the API returns 429 with Retry-After.
  - **AC-O1** Given traffic has been served, when Prometheus scrapes /metrics, then request, redirect and cache metrics are exposed.
  - **AC-P1** Given 20 concurrent clients, when they follow links, then p95 redirect latency is under 50 ms.

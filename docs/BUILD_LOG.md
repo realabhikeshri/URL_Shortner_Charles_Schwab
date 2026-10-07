@@ -122,3 +122,15 @@ reviewed and approved via the CLI. p95 6 ms vs 50 ms target. Evidence: `runs/amb
 file) -> the requirement artifact now carries the source filename and re-analysis keeps the previous id. The
 paused run with the wrong id was discarded and the scenario re-run; replay fixtures were re-recorded because
 the analyst prompt changed.
+
+## Phase 8 — Reports and observability
+
+Every run writes `report.md` + self-contained `report.html` (inline SVG DAG and timeline, light/dark theme, no
+external scripts), `metrics.json`, `decisions.json`, `traces.jsonl`, `plan.mmd`, `changes.patch`. Cross-run
+metrics exported to `runs/metrics.json` and `runs/metrics.prom` via `orchestrator metrics [--format prometheus]`.
+
+**Broke / fixed:** reviewing the ambiguous report showed spec v2 quality problems: the amendment's phrase
+"security review" matched the vague term *secure* (ambiguity 1.0), the title was rebuilt from amended text, and an
+answered open question did not reduce ambiguity. Analyst rules fixed (narrower pattern, keep the previous title,
+credit per resolved question); the ambiguous run was re-executed with the same human approvals and replaces the
+earlier evidence. `make demo` reproduces the committed service byte-for-byte.

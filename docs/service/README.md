@@ -65,7 +65,7 @@ All settings are environment variables with the `SHORTENER_` prefix:
 
 ## Requirements implemented
 
-Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster. Update from security review: ent**
+Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster**
 
 - Read-through redirect cache
 - Token-bucket rate limiting

@@ -39,7 +39,7 @@
  ## Requirements implemented
  
 -Latest change: **REQ-BF-002 - Click analytics, link expiry and alias case bug fix**
-+Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster. Update from security review: ent**
++Latest change: **REQ-AMBIGUOUS - Make the shortener enterprise-ready and faster**
  
 -- GET /api/v1/links/{code}/stats returns total clicks, unique visitors, clicks by day, top referrers and top user-agent families.
 -- Clicks are recorded off the redirect hot path; analytics failures never fail a redirect.
