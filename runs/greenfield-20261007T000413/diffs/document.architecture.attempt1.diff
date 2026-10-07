@@ -1,0 +1,603 @@
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,54 @@
+ # URL Shortener
+ 
+-Workspace created by the agentic SDLC orchestrator.
++A production-minded URL shortener (FastAPI, SQLAlchemy 2.0 async, Alembic). Built and evolved by the agentic SDLC orchestrator; every change traces to a run in `runs/`.
++
++## Run
++
++```bash
++uvicorn service.app:create_app --factory --port 8000
++```
++
++## Endpoints
++
++| Method | Path | Summary |
++|---|---|---|
++| GET | `/healthz` | Liveness probe |
++| GET | `/readyz` | Readiness probe (database reachable) |
++| POST | `/api/v1/links` | create link |
++| GET | `/api/v1/links/{code}` | get link |
++| PATCH | `/api/v1/links/{code}` | update link |
++| DELETE | `/api/v1/links/{code}` | delete link |
++| GET | `/{code}` | follow |
++
++Full reference: `docs/service/API.md`; OpenAPI: `docs/openapi.json`.
++
++## Configuration
++
++All settings are environment variables with the `SHORTENER_` prefix:
++
++- `SHORTENER_ALLOW_PRIVATE_HOSTS`
++- `SHORTENER_APP_NAME`
++- `SHORTENER_BASE_URL`
++- `SHORTENER_CODE_LENGTH`
++- `SHORTENER_CODE_MAX_ATTEMPTS`
++- `SHORTENER_CORS_ORIGINS`
++- `SHORTENER_DATABASE_URL`
++- `SHORTENER_DB_AUTO_MIGRATE`
++- `SHORTENER_DB_POOL_SIZE`
++- `SHORTENER_ENVIRONMENT`
++- `SHORTENER_HSTS_ENABLED`
++- `SHORTENER_LOG_JSON`
++- `SHORTENER_LOG_LEVEL`
++- `SHORTENER_MAX_REQUEST_BODY_BYTES`
++- `SHORTENER_MAX_URL_LENGTH`
++- `SHORTENER_REDIRECT_STATUS_CODE`
++
++## Requirements implemented
++
++Latest change: **REQ-GF-001 - URL shortener core service**
++
++- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key.
++- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links.
++- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE.
++- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes.
++- Persist links in a relational database managed by reversible migrations.
+
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -3,3 +3,10 @@
+ All notable changes to this service are documented here (format: Keep a Changelog, versioning: SemVer).
+ 
+ ## [Unreleased]
++
++### Added
++- Create short links via POST /api/v1/links with optional custom alias and tags; support Idempotency-Key. (REQ-GF-001)
++- Redirect GET /{code} to the target URL (302 by default, 307 configurable); 404 for unknown codes, 410 for disabled or deleted links. (REQ-GF-001)
++- Read link metadata via GET /api/v1/links/{code}; disable via PATCH; soft delete via DELETE. (REQ-GF-001)
++- Liveness (GET /healthz) and readiness (GET /readyz, checks the database) probes. (REQ-GF-001)
++- Persist links in a relational database managed by reversible migrations. (REQ-GF-001)
+
+--- /dev/null
++++ b/docs/service/API.md
+@@ -0,0 +1,69 @@
++# URL Shortener reference
++
++Version 0.1.0. Generated from the live OpenAPI schema by the DocWriter agent; do not edit by hand.
++
++## `POST /api/v1/links`
++
++Create Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `Idempotency-Key` | header | False |
++
++Request body: `LinkCreate`
++
++Responses: `201`, `422`
++
++## `DELETE /api/v1/links/{code}`
++
++Delete Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `204`, `422`
++
++## `GET /api/v1/links/{code}`
++
++Get Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `200`, `422`
++
++## `PATCH /api/v1/links/{code}`
++
++Update Link
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Request body: `LinkUpdate`
++
++Responses: `200`, `422`
++
++## `GET /healthz`
++
++Liveness probe
++
++Responses: `200`
++
++## `GET /readyz`
++
++Readiness probe (database reachable)
++
++Responses: `200`
++
++## `GET /{code}`
++
++Follow
++
++| Parameter | In | Required |
++|---|---|---|
++| `code` | path | True |
++
++Responses: `302`, `404`, `410`, `422`
+
+--- /dev/null
++++ b/docs/openapi.json
+@@ -0,0 +1,454 @@
++{
++  "components": {
++    "schemas": {
++      "HTTPValidationError": {
++        "properties": {
++          "detail": {
++            "items": {
++              "$ref": "#/components/schemas/ValidationError"
++            },
++            "title": "Detail",
++            "type": "array"
++          }
++        },
++        "title": "HTTPValidationError",
++        "type": "object"
++      },
++      "LinkCreate": {
++        "additionalProperties": false,
++        "properties": {
++          "custom_alias": {
++            "anyOf": [
++              {
++                "maxLength": 64,
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "examples": [
++              "launch-2026"
++            ],
++            "title": "Custom Alias"
++          },
++          "tags": {
++            "items": {
++              "maxLength": 32,
++              "minLength": 1,
++              "pattern": "^[A-Za-z0-9_.-]+$",
++              "type": "string"
++            },
++            "maxItems": 10,
++            "title": "Tags",
++            "type": "array"
++          },
++          "url": {
++            "examples": [
++              "https://example.com/docs"
++            ],
++            "maxLength": 8192,
++            "minLength": 1,
++            "title": "Url",
++            "type": "string"
++          }
++        },
++        "required": [
++          "url"
++        ],
++        "title": "LinkCreate",
++        "type": "object"
++      },
++      "LinkOut": {
++        "properties": {
++          "code": {
++            "title": "Code",
++            "type": "string"
++          },
++          "created_at": {
++            "format": "date-time",
++            "title": "Created At",
++            "type": "string"
++          },
++          "disabled": {
++            "title": "Disabled",
++            "type": "boolean"
++          },
++          "is_custom": {
++            "title": "Is Custom",
++            "type": "boolean"
++          },
++          "short_url": {
++            "title": "Short Url",
++            "type": "string"
++          },
++          "tags": {
++            "items": {
++              "type": "string"
++            },
++            "title": "Tags",
++            "type": "array"
++          },
++          "target_url": {
++            "title": "Target Url",
++            "type": "string"
++          },
++          "updated_at": {
++            "format": "date-time",
++            "title": "Updated At",
++            "type": "string"
++          }
++        },
++        "required": [
++          "code",
++          "short_url",
++          "target_url",
++          "is_custom",
++          "tags",
++          "disabled",
++          "created_at",
++          "updated_at"
++        ],
++        "title": "LinkOut",
++        "type": "object"
++      },
++      "LinkUpdate": {
++        "additionalProperties": false,
++        "properties": {
++          "disabled": {
++            "anyOf": [
++              {
++                "type": "boolean"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Disabled"
++          }
++        },
++        "title": "LinkUpdate",
++        "type": "object"
++      },
++      "ValidationError": {
++        "properties": {
++          "ctx": {
++            "title": "Context",
++            "type": "object"
++          },
++          "input": {
++            "title": "Input"
++          },
++          "loc": {
++            "items": {
++              "anyOf": [
++                {
++                  "type": "string"
++                },
++                {
++                  "type": "integer"
++                }
++              ]
++            },
++            "title": "Location",
++            "type": "array"
++          },
++          "msg": {
++            "title": "Message",
++            "type": "string"
++          },
++          "type": {
++            "title": "Error Type",
++            "type": "string"
++          }
++        },
++        "required": [
++          "loc",
++          "msg",
++          "type"
++        ],
++        "title": "ValidationError",
++        "type": "object"
++      }
++    }
++  },
++  "info": {
++    "title": "URL Shortener",
++    "version": "0.1.0"
++  },
++  "openapi": "3.1.0",
++  "paths": {
++    "/api/v1/links": {
++      "post": {
++        "operationId": "create_link_api_v1_links_post",
++        "parameters": [
++          {
++            "in": "header",
++            "name": "Idempotency-Key",
++            "required": false,
++            "schema": {
++              "anyOf": [
++                {
++                  "maxLength": 128,
++                  "type": "string"
++                },
++                {
++                  "type": "null"
++                }
++              ],
++              "title": "Idempotency-Key"
++            }
++          }
++        ],
++        "requestBody": {
++          "content": {
++            "application/json": {
++              "schema": {
++                "$ref": "#/components/schemas/LinkCreate"
++              }
++            }
++          },
++          "required": true
++        },
++        "responses": {
++          "201": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/LinkOut"
++                }
++              }
++            },
++            "description": "Successful Response"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Create Link",
++        "tags": [
++          "links"
++        ]
++      }
++    },
++    "/api/v1/links/{code}": {
++      "delete": {
++        "operationId": "delete_link_api_v1_links__code__delete",
++        "parameters": [
++          {
++            "in": "path",
++            "name": "code",
++            "required": true,
++            "schema": {
++              "title": "Code",
++              "type": "string"
++            }
++          }
++        ],
++        "responses": {
++          "204": {
++            "description": "Successful Response"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Delete Link",
++        "tags": [
++          "links"
++        ]
++      },
++      "get": {
++        "operationId": "get_link_api_v1_links__code__get",
++        "parameters": [
++          {
++            "in": "path",
++            "name": "code",
++            "required": true,
++            "schema": {
++              "title": "Code",
++              "type": "string"
++            }
++          }
++        ],
++        "responses": {
++          "200": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/LinkOut"
++                }
++              }
++            },
++            "description": "Successful Response"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Get Link",
++        "tags": [
++          "links"
++        ]
++      },
++      "patch": {
++        "operationId": "update_link_api_v1_links__code__patch",
++        "parameters": [
++          {
++            "in": "path",
++            "name": "code",
++            "required": true,
++            "schema": {
++              "title": "Code",
++              "type": "string"
++            }
++          }
++        ],
++        "requestBody": {
++          "content": {
++            "application/json": {
++              "schema": {
++                "$ref": "#/components/schemas/LinkUpdate"
++              }
++            }
++          },
++          "required": true
++        },
++        "responses": {
++          "200": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/LinkOut"
++                }
++              }
++            },
++            "description": "Successful Response"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Update Link",
++        "tags": [
++          "links"
++        ]
++      }
++    },
++    "/healthz": {
++      "get": {
++        "operationId": "healthz_healthz_get",
++        "responses": {
++          "200": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "additionalProperties": {
++                    "type": "string"
++                  },
++                  "title": "Response Healthz Healthz Get",
++                  "type": "object"
++                }
++              }
++            },
++            "description": "Successful Response"
++          }
++        },
++        "summary": "Liveness probe",
++        "tags": [
++          "health"
++        ]
++      }
++    },
++    "/readyz": {
++      "get": {
++        "operationId": "readyz_readyz_get",
++        "responses": {
++          "200": {
++            "content": {
++              "application/json": {
++                "schema": {}
++              }
++            },
++            "description": "Successful Response"
++          }
++        },
++        "summary": "Readiness probe (database reachable)",
++        "tags": [
++          "health"
++        ]
++      }
++    },
++    "/{code}": {
++      "get": {
++        "operationId": "follow__code__get",
++        "parameters": [
++          {
++            "in": "path",
++            "name": "code",
++            "required": true,
++            "schema": {
++              "maxLength": 64,
++              "minLength": 1,
++              "title": "Code",
++              "type": "string"
++            }
++          }
++        ],
++        "responses": {
++          "302": {
++            "description": "Successful Response"
++          },
++          "404": {
++            "description": "Unknown code"
++          },
++          "410": {
++            "description": "Expired or disabled"
++          },
++          "422": {
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/HTTPValidationError"
++                }
++              }
++            },
++            "description": "Validation Error"
++          }
++        },
++        "summary": "Follow",
++        "tags": [
++          "redirect"
++        ]
++      }
++    }
++  }
++}

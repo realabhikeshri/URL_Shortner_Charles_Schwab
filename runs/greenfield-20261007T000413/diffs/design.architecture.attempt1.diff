@@ -1,0 +1,46 @@
+--- /dev/null
++++ b/docs/design/architecture.md
+@@ -0,0 +1,43 @@
++# Design - URL shortener core service
++
++Requirement: **REQ-GF-001** (v1, risk medium)
++
++## Summary
++
++Build a URL shortener with create, redirect, metadata and health endpoints, persistence and tests. Impact analysis: Empty workspace: greenfield build, no existing code is impacted.
++
++## Components
++
++- service.config / service.db / service.models - settings, async engine, Link model (UTC-safe timestamps)
++- service.domain.codes - base62 CSPRNG codes, alias validation, reserved words
++- service.domain.urls - scheme/host validation and normalisation
++- service.links.LinkService + service.repository - use cases and SQL
++- service.api.{links,redirect,health,middleware} - HTTP surface, pure-ASGI middleware
++
++## Decisions
++
++| Decision | Rationale / rejected alternative |
++|---|---|
++| 302 by default (307 configurable) | 301 is cached forever by browsers, breaking disable/delete and analytics |
++| 7-char random base62 codes with bounded retry | 62^7 = 3.5e12; per-insert collision p = n/62^7; no central counter to coordinate |
++| Soft delete + 410 Gone | keeps audit history and prevents silent alias re-use |
++| Idempotency-Key stored on the link with a request fingerprint | simple, transactional, survives restarts |
++
++## Data model
++
++- `links(id, code UNIQUE, target_url, is_custom, tags JSON, disabled, created_at, updated_at, deleted_at, idempotency_key UNIQUE, request_fingerprint)`
++
++## Risks and assumptions
++
++- none identified
++
++## Acceptance criteria
++
++- **AC-1** Given a valid https URL, when a client POSTs it to /api/v1/links, then the API returns 201 with code, short_url and created_at.
++- **AC-2** Given an existing short code, when a client requests GET /{code}, then the service redirects with 302 to the stored target and Cache-Control no-store.
++- **AC-3** Given an unknown code, when a client requests GET /{code}, then the service returns 404 using the error envelope.
++- **AC-4** Given a javascript:, private-network or malformed URL, when a client tries to shorten it, then the API rejects it with 422.
++- **AC-5** Given the same Idempotency-Key and body sent twice, when both requests complete, then exactly one link exists and the second response is a replay.
++- **AC-6** Given a disabled or deleted link, when a client follows it, then the service returns 410 Gone.
++- **AC-7** Given the service is running, when probes call /healthz and /readyz, then they report liveness and database readiness.
++- **AC-8** Given the migration history, when it is upgraded, downgraded and upgraded again, then every step succeeds.

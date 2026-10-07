@@ -87,3 +87,14 @@ iterated together; `service/` in the repo is **synced from orchestrator output**
 
 **Tests:** 284 passing (incl. a slow end-to-end test of all three scenarios with human approvals);
 service coverage 97%, orchestrator 92%.
+
+## Phase 5 — Greenfield run (committed evidence)
+
+`make scenario-greenfield` from an empty scaffold: 14/14 nodes, 0 retries, 2 auto-approved medium gates
+(migration 0001 + new dependencies; release sign-off). Evidence: `runs/greenfield-*/`.
+
+Manual review of the generated service against §3 found issues that were fixed **in the blueprints** (the
+deterministic provider's "prompt"), so lineage stays honest — the committed service is still byte-identical to
+orchestrator output. They are listed in ADR-014: entropy false positive on the base62 alphabet, Alembic imports,
+the streaming body-limit path (raise inside the app so the handler renders 413), and the seeded alias-case bug
+(kept deliberately for the brownfield scenario).

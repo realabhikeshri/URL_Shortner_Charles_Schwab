@@ -1,0 +1,25 @@
+{
+  "modules": [],
+  "seeds": [],
+  "impacted_modules": [],
+  "impacted_routes": [],
+  "route_source": "none",
+  "routed_modules": [],
+  "tables": {},
+  "tables_touched": [],
+  "migrations_needed": false,
+  "tests_to_update": [],
+  "blast_radius": 0.0,
+  "symbols_indexed": 0,
+  "errors": [],
+  "narrative": {
+    "summary": "Empty workspace: greenfield build, no existing code is impacted.",
+    "risk": "low",
+    "recommendations": [
+      "Establish migrations, tests and CI gates from the first change."
+    ]
+  },
+  "symbol_index": {},
+  "test_map": {},
+  "routes": []
+}

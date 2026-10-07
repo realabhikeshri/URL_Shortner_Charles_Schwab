@@ -1,0 +1,478 @@
+--- /dev/null
++++ b/service/api/links.py
+@@ -0,0 +1,43 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Link management API (/api/v1/links)."""
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, Header, Response, status
++
++from service.api.deps import get_link_service
++from service.links import LinkService
++from service.schemas import LinkCreate, LinkOut, LinkUpdate
++
++router = APIRouter(prefix="/api/v1/links", tags=["links"])
++Service = Annotated[LinkService, Depends(get_link_service)]
++
++
++@router.post("", status_code=status.HTTP_201_CREATED, response_model=LinkOut)
++async def create_link(
++    payload: LinkCreate,
++    response: Response,
++    service: Service,
++    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
++) -> LinkOut:
++    link, created = await service.create(payload, idempotency_key)
++    if not created:
++        response.headers["Idempotent-Replayed"] = "true"
++    response.headers["Location"] = f"/api/v1/links/{link.code}"
++    return service.to_out(link)
++
++
++@router.get("/{code}", response_model=LinkOut)
++async def get_link(code: str, service: Service) -> LinkOut:
++    return service.to_out(await service.get(code))
++
++
++@router.patch("/{code}", response_model=LinkOut)
++async def update_link(code: str, patch: LinkUpdate, service: Service) -> LinkOut:
++    return service.to_out(await service.update(code, patch))
++
++
++@router.delete("/{code}", status_code=status.HTTP_204_NO_CONTENT)
++async def delete_link(code: str, service: Service) -> Response:
++    await service.delete(code)
++    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+--- /dev/null
++++ b/service/api/redirect.py
+@@ -0,0 +1,30 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Public redirect endpoint (registered last so fixed routes win)."""
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, Path
++from fastapi.responses import RedirectResponse
++
++from service.api.deps import get_link_service
++from service.links import LinkService
++
++router = APIRouter(tags=["redirect"])
++
++
++@router.get(
++    "/{code}",
++    status_code=302,
++    response_class=RedirectResponse,
++    responses={404: {"description": "Unknown code"}, 410: {"description": "Expired or disabled"}},
++)
++async def follow(
++    code: Annotated[str, Path(min_length=1, max_length=64)],
++    service: Annotated[LinkService, Depends(get_link_service)],
++) -> RedirectResponse:
++    link = await service.resolve(code)
++    return RedirectResponse(
++        link.target_url,
++        status_code=service.settings.redirect_status_code,
++        headers={"Cache-Control": "private, no-store"},
++    )
+
+--- /dev/null
++++ b/service/links.py
+@@ -0,0 +1,144 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Link use cases: create (idempotent), resolve, read, update, soft-delete."""
++
++import hashlib
++import json
++
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.config import Settings
++from service.db import utcnow
++from service.domain.codes import AliasError, generate_code, normalize_alias
++from service.domain.urls import UrlError, normalize_url
++from service.errors import ConflictError, GoneError, InvalidInputError, NotFoundError
++from service.models import Link
++from service.observability import get_logger
++from service.repository import LinkRepository
++from service.schemas import LinkCreate, LinkOut, LinkUpdate
++
++log = get_logger("links")
++
++
++def fingerprint(payload: LinkCreate) -> str:
++    canonical = json.dumps(payload.model_dump(mode="json"), sort_keys=True)
++    return hashlib.sha256(canonical.encode()).hexdigest()
++
++
++class LinkService:
++    def __init__(self, session: AsyncSession, settings: Settings) -> None:
++        self.session = session
++        self.settings = settings
++        self.repo = LinkRepository(session)
++
++    def to_out(self, link: Link) -> LinkOut:
++        return LinkOut(
++            code=link.code,
++            short_url=f"{self.settings.base_url}/{link.code}",
++            target_url=link.target_url,
++            is_custom=link.is_custom,
++            tags=list(link.tags or []),
++            disabled=link.disabled,
++            created_at=link.created_at,
++            updated_at=link.updated_at,
++        )
++
++    async def create(
++        self, payload: LinkCreate, idempotency_key: str | None = None
++    ) -> tuple[Link, bool]:
++        """Return ``(link, created)``; ``created`` is False for an idempotent replay."""
++        try:
++            target = normalize_url(
++                payload.url,
++                max_length=self.settings.max_url_length,
++                allow_private=self.settings.allow_private_hosts,
++            )
++        except UrlError as exc:
++            raise InvalidInputError(str(exc)) from exc
++        digest = fingerprint(payload)
++        if idempotency_key:
++            replay = await self._replay(idempotency_key, digest)
++            if replay is not None:
++                return replay, False
++
++        if payload.custom_alias is not None:
++            try:
++                alias = normalize_alias(payload.custom_alias)
++            except AliasError as exc:
++                raise InvalidInputError(str(exc)) from exc
++            if await self.repo.alias_taken(alias):
++                raise ConflictError(f"alias '{payload.custom_alias}' is already taken")
++            candidates = [alias]
++        else:
++            candidates = [
++                generate_code(self.settings.code_length)
++                for _ in range(self.settings.code_max_attempts)
++            ]
++
++        for code in candidates:
++            if payload.custom_alias is None and await self.repo.code_exists(code):
++                log.info("code collision, retrying", extra={"code_length": len(code)})
++                continue
++            link = Link(
++                code=code,
++                target_url=target,
++                is_custom=payload.custom_alias is not None,
++                tags=list(payload.tags),
++                idempotency_key=idempotency_key,
++                request_fingerprint=digest if idempotency_key else None,
++            )
++            try:
++                await self.repo.add(link)
++                await self.session.commit()
++            except IntegrityError:
++                await self.session.rollback()
++                if idempotency_key:
++                    replay = await self._replay(idempotency_key, digest)
++                    if replay is not None:
++                        return replay, False
++                if payload.custom_alias is not None:
++                    raise ConflictError(
++                        f"alias '{payload.custom_alias}' is already taken"
++                    ) from None
++                continue
++            log.info("link created", extra={"code": link.code, "custom": link.is_custom})
++            return link, True
++        raise ConflictError("could not allocate a unique code; please retry")
++
++    async def _replay(self, key: str, digest: str) -> Link | None:
++        existing = await self.repo.get_by_idempotency_key(key)
++        if existing is None:
++            return None
++        if existing.request_fingerprint != digest:
++            raise ConflictError("Idempotency-Key was already used with a different request body")
++        return existing
++
++    async def resolve(self, code: str) -> Link:
++        """Look up a link for redirecting; raises 404 for unknown and 410 for gone links."""
++        link = await self.repo.get_by_code(code)
++        if link is None:
++            raise NotFoundError(f"no link with code '{code}'")
++        if link.deleted_at is not None or link.disabled:
++            raise GoneError(f"link '{code}' is no longer available")
++        return link
++
++    async def get(self, code: str) -> Link:
++        link = await self.repo.get_by_code(code)
++        if link is None or link.deleted_at is not None:
++            raise NotFoundError(f"no link with code '{code}'")
++        return link
++
++    async def update(self, code: str, patch: LinkUpdate) -> Link:
++        link = await self.get(code)
++        if patch.disabled is not None:
++            link.disabled = patch.disabled
++        link.updated_at = utcnow()
++        await self.session.commit()
++        return link
++
++    async def delete(self, code: str) -> None:
++        link = await self.get(code)
++        link.deleted_at = utcnow()
++        link.updated_at = link.deleted_at
++        await self.session.commit()
++        log.info("link deleted", extra={"code": code})
+
+--- /dev/null
++++ b/service/repository.py
+@@ -0,0 +1,35 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Data access for links."""
++
++from sqlalchemy import func, select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from service.models import Link
++
++
++class LinkRepository:
++    def __init__(self, session: AsyncSession) -> None:
++        self.session = session
++
++    async def get_by_code(self, code: str) -> Link | None:
++        result = await self.session.execute(select(Link).where(Link.code == code))
++        return result.scalar_one_or_none()
++
++    async def code_exists(self, code: str) -> bool:
++        result = await self.session.execute(select(Link.id).where(Link.code == code))
++        return result.first() is not None
++
++    async def alias_taken(self, alias: str) -> bool:
++        result = await self.session.execute(
++            select(Link.id).where(func.lower(Link.code) == alias.lower())
++        )
++        return result.first() is not None
++
++    async def get_by_idempotency_key(self, key: str) -> Link | None:
++        result = await self.session.execute(select(Link).where(Link.idempotency_key == key))
++        return result.scalar_one_or_none()
++
++    async def add(self, link: Link) -> Link:
++        self.session.add(link)
++        await self.session.flush()
++        return link
+
+--- /dev/null
++++ b/service/schemas.py
+@@ -0,0 +1,40 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++"""Public API models."""
++
++from datetime import datetime
++from typing import Annotated
++
++from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
++
++Tag = Annotated[str, StringConstraints(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")]
++
++
++class LinkCreate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    url: str = Field(min_length=1, max_length=8192, examples=["https://example.com/docs"])
++    custom_alias: str | None = Field(None, max_length=64, examples=["launch-2026"])
++    tags: list[Tag] = Field(default_factory=list, max_length=10)
++
++
++class LinkUpdate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    disabled: bool | None = None
++
++    @model_validator(mode="after")
++    def _not_empty(self) -> "LinkUpdate":
++        if not self.model_fields_set:
++            raise ValueError("at least one field must be provided")
++        return self
++
++
++class LinkOut(BaseModel):
++    code: str
++    short_url: str
++    target_url: str
++    is_custom: bool
++    tags: list[str]
++    disabled: bool
++    created_at: datetime
++    updated_at: datetime
+
+--- /dev/null
++++ b/tests/service/test_api_links.py
+@@ -0,0 +1,114 @@
++# lineage: REQ-GF-001 / implement.links_api (see runs/ for the decision trail)
++from httpx import AsyncClient
++
++from service.config import Settings
++
++
++async def create(client: AsyncClient, **body: object) -> dict[str, object]:
++    resp = await client.post("/api/v1/links", json={"url": "https://example.com/a", **body})
++    assert resp.status_code == 201, resp.text
++    return resp.json()  # type: ignore[no-any-return]
++
++
++async def test_create_returns_201_with_short_url(client: AsyncClient) -> None:
++    resp = await client.post(
++        "/api/v1/links", json={"url": "https://Example.com/docs", "tags": ["launch"]}
++    )
++    assert resp.status_code == 201
++    body = resp.json()
++    assert len(body["code"]) == 7
++    assert body["short_url"] == f"http://sho.rt/{body['code']}"
++    assert body["target_url"] == "https://example.com/docs"
++    assert body["tags"] == ["launch"]
++    assert body["created_at"]
++    assert resp.headers["Location"] == f"/api/v1/links/{body['code']}"
++
++
++async def test_redirect_follows_with_302_and_no_store(client: AsyncClient) -> None:
++    link = await create(client)
++    resp = await client.get(f"/{link['code']}")
++    assert resp.status_code == 302
++    assert resp.headers["location"] == "https://example.com/a"
++    assert resp.headers["cache-control"] == "private, no-store"
++
++
++async def test_unknown_code_is_404(client: AsyncClient) -> None:
++    resp = await client.get("/doesnotexist")
++    assert resp.status_code == 404
++    assert resp.json()["error"]["code"] == "not_found"
++
++
++async def test_invalid_urls_are_rejected_with_422(client: AsyncClient) -> None:
++    for url in ("javascript:alert(1)", "http://127.0.0.1/", "not a url"):
++        resp = await client.post("/api/v1/links", json={"url": url})
++        assert resp.status_code == 422
++        assert resp.json()["error"]["code"] == "invalid_input"
++
++
++async def test_schema_validation_errors_use_envelope(client: AsyncClient) -> None:
++    resp = await client.post("/api/v1/links", json={"url": "https://e.com", "surprise": 1})
++    assert resp.status_code == 422
++    assert resp.json()["error"]["code"] == "validation_error"
++    bad_tags = await client.post("/api/v1/links", json={"url": "https://e.com", "tags": ["a b"]})
++    assert bad_tags.status_code == 422
++
++
++async def test_custom_alias_and_conflict(client: AsyncClient) -> None:
++    link = await create(client, custom_alias="launch-2026")
++    assert link["code"] == "launch-2026"
++    assert link["is_custom"] is True
++    dup = await client.post(
++        "/api/v1/links", json={"url": "https://e.com", "custom_alias": "launch-2026"}
++    )
++    assert dup.status_code == 409
++    reserved = await client.post(
++        "/api/v1/links", json={"url": "https://e.com", "custom_alias": "api"}
++    )
++    assert reserved.status_code == 422
++
++
++async def test_idempotency_key_replays_and_detects_misuse(client: AsyncClient) -> None:
++    headers = {"Idempotency-Key": "req-42"}
++    first = await client.post("/api/v1/links", json={"url": "https://e.com/x"}, headers=headers)
++    again = await client.post("/api/v1/links", json={"url": "https://e.com/x"}, headers=headers)
++    assert first.status_code == again.status_code == 201
++    assert first.json()["code"] == again.json()["code"]
++    assert again.headers["Idempotent-Replayed"] == "true"
++    misuse = await client.post("/api/v1/links", json={"url": "https://e.com/y"}, headers=headers)
++    assert misuse.status_code == 409
++
++
++async def test_metadata_patch_and_soft_delete(client: AsyncClient) -> None:
++    link = await create(client)
++    code = link["code"]
++    meta = await client.get(f"/api/v1/links/{code}")
++    assert meta.status_code == 200
++    assert meta.json()["disabled"] is False
++
++    disabled = await client.patch(f"/api/v1/links/{code}", json={"disabled": True})
++    assert disabled.json()["disabled"] is True
++    assert (await client.get(f"/{code}")).status_code == 410
++    await client.patch(f"/api/v1/links/{code}", json={"disabled": False})
++    assert (await client.get(f"/{code}")).status_code == 302
++
++    empty = await client.patch(f"/api/v1/links/{code}", json={})
++    assert empty.status_code == 422
++
++    assert (await client.delete(f"/api/v1/links/{code}")).status_code == 204
++    assert (await client.get(f"/api/v1/links/{code}")).status_code == 404
++    assert (await client.get(f"/{code}")).status_code == 410
++    assert (await client.delete(f"/api/v1/links/{code}")).status_code == 404
++
++
++async def test_redirect_status_is_configurable(settings: Settings) -> None:
++    from httpx import ASGITransport
++
++    from service.app import create_app
++
++    app = create_app(settings.model_copy(update={"redirect_status_code": 307}))
++    async with (
++        app.router.lifespan_context(app),
++        AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c,
++    ):
++        code = (await c.post("/api/v1/links", json={"url": "https://e.com"})).json()["code"]
++        assert (await c.get(f"/{code}")).status_code == 307
+
+--- a/service/api/deps.py
++++ b/service/api/deps.py
+@@ -2,12 +2,14 @@
+ """FastAPI dependencies shared by the routers."""
+ 
+ from collections.abc import AsyncIterator
++from typing import Annotated
+ 
+-from fastapi import Request
++from fastapi import Depends, Request
+ from sqlalchemy.ext.asyncio import AsyncSession
+ 
+ from service.config import Settings
+ from service.db import Database
++from service.links import LinkService
+ 
+ 
+ def get_settings(request: Request) -> Settings:
+@@ -23,3 +25,10 @@
+ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+     async with get_database(request).session() as session:
+         yield session
++
++
++async def get_link_service(
++    session: Annotated[AsyncSession, Depends(get_session)],
++    settings: Annotated[Settings, Depends(get_settings)],
++) -> LinkService:
++    return LinkService(session, settings)
+
+--- a/service/app.py
++++ b/service/app.py
+@@ -8,7 +8,7 @@
+ from fastapi.middleware.cors import CORSMiddleware
+ 
+ from service import __version__
+-from service.api import health
++from service.api import health, links, redirect
+ from service.api.middleware import (
+     BodySizeLimitMiddleware,
+     RequestContextMiddleware,
+@@ -57,4 +57,6 @@
+     app.add_middleware(RequestContextMiddleware)
+ 
+     app.include_router(health.router)
++    app.include_router(links.router)
++    app.include_router(redirect.router)  # catch-all /{code}: keep last
+     return app

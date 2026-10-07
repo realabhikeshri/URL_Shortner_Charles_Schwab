@@ -1,0 +1,52 @@
+flowchart TD
+    intake["intake<br/><small>intake · RequirementAnalyst · risk low</small>"]
+    analysis_impact["analysis.impact<br/><small>analysis · CodebaseAnalyst · risk low</small>"]
+    plan["plan<br/><small>plan · Planner · risk low</small>"]
+    design_architecture["design.architecture<br/><small>design · Architect · risk low</small>"]
+    implement_foundation["implement.foundation<br/><small>implement · Implementer · risk medium</small>"]
+    implement_codes["implement.codes<br/><small>implement · Implementer · risk low</small>"]
+    implement_urls["implement.urls<br/><small>implement · Implementer · risk medium</small>"]
+    implement_links_api["implement.links_api<br/><small>implement · Implementer · risk medium</small>"]
+    test_properties["test.properties<br/><small>test · TestEngineer · risk low</small>"]
+    test_integration["test.integration<br/><small>test · TestEngineer · risk low</small>"]
+    document_architecture["document.architecture<br/><small>document · DocWriter · risk low</small>"]
+    test_coverage["test.coverage<br/><small>test · TestEngineer · risk low</small>"]
+    review_code["review.code<br/><small>review · Reviewer · risk low</small>"]
+    release_readiness["release.readiness<br/><small>release_check · ReleaseManager · risk medium</small>"]
+    intake --> analysis_impact
+    analysis_impact --> plan
+    plan --> design_architecture
+    design_architecture --> implement_foundation
+    implement_foundation --> implement_codes
+    implement_foundation --> implement_urls
+    implement_codes --> implement_links_api
+    implement_urls --> implement_links_api
+    implement_links_api --> test_properties
+    implement_links_api --> test_integration
+    implement_links_api --> document_architecture
+    implement_links_api --> test_coverage
+    test_integration --> test_coverage
+    test_properties --> test_coverage
+    document_architecture --> review_code
+    test_coverage --> review_code
+    review_code --> release_readiness
+    classDef ok fill:#d1fadf,stroke:#12b76a;
+    classDef bad fill:#fee4e2,stroke:#d92d20;
+    classDef warn fill:#fef0c7,stroke:#dc6803;
+    classDef gate fill:#e0eaff,stroke:#444ce7;
+    classDef run fill:#f2f4f7,stroke:#344054;
+    classDef skip fill:#f9fafb,stroke:#98a2b3,stroke-dasharray: 4 2;
+    class intake ok;
+    class analysis_impact ok;
+    class plan ok;
+    class design_architecture ok;
+    class implement_foundation ok;
+    class implement_codes ok;
+    class implement_urls ok;
+    class implement_links_api ok;
+    class test_properties ok;
+    class test_integration ok;
+    class document_architecture ok;
+    class test_coverage ok;
+    class review_code ok;
+    class release_readiness ok;
